@@ -41,11 +41,8 @@ use codex_config::CloudRequirementsLoader;
 use codex_config::ConfigLoadError;
 use codex_config::LoaderOverrides;
 use codex_config::format_config_error_with_source;
-use codex_config::loader::project_trust_key;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
-use codex_exec_server::LOCAL_FS;
-use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_login::AuthConfig;
 use codex_login::default_client::originator;
 use codex_login::default_client::set_default_client_residency_requirement;
@@ -1287,14 +1284,8 @@ async fn run_ratatui_app(
         let Some(app_server) = app_server.as_ref() else {
             unreachable!("app server should exist before OSS provider persistence");
         };
-        if let Err(err) = crate::config_update::write_config_batch(
-            app_server.request_handle(),
-            vec![crate::config_update::replace_config_value(
-                "oss_provider",
-                serde_json::json!(provider),
-            )],
-        )
-        .await
+        if let Err(err) =
+            crate::config_update::write_oss_provider(app_server.request_handle(), provider).await
         {
             tracing::warn!(error = %err, "failed to persist OSS provider preference");
         }
@@ -1350,31 +1341,17 @@ async fn run_ratatui_app(
             onboarding_result.directory_trust_decision,
             Some(crate::onboarding::TrustDirectorySelection::Trust)
         ) {
-            let trust_target =
-                resolve_root_git_project_for_trust(LOCAL_FS.as_ref(), &initial_config.cwd)
-                    .await
-                    .map(Into::into)
-                    .unwrap_or_else(|| initial_config.cwd.to_path_buf());
-            let mut project_update = serde_json::Map::new();
-            project_update.insert(
-                project_trust_key(trust_target.as_path()),
-                serde_json::json!({ "trust_level": "trusted" }),
-            );
             let Some(app_server) = app_server.as_ref() else {
                 unreachable!("app server should exist while onboarding is active");
             };
-            if let Err(err) = crate::config_update::write_config_batch(
+            if let Err(err) = crate::config_update::write_trusted_project(
                 app_server.request_handle(),
-                vec![crate::config_update::upsert_config_value(
-                    "projects",
-                    serde_json::Value::Object(project_update),
-                )],
+                &initial_config.cwd,
             )
             .await
             {
                 tracing::warn!(
                     error = %err,
-                    project = %trust_target.display(),
                     "failed to persist trusted project state through app server"
                 );
             }

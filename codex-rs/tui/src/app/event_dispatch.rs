@@ -1533,12 +1533,10 @@ impl App {
                 self.chat_widget.set_plan_mode_reasoning_effort(effort);
             }
             AppEvent::PersistFullAccessWarningAcknowledged => {
-                if let Err(err) = crate::config_update::write_config_batch(
+                if let Err(err) = crate::config_update::write_config_value(
                     app_server.request_handle(),
-                    vec![crate::config_update::replace_config_value(
-                        "notice.hide_full_access_warning",
-                        serde_json::json!(true),
-                    )],
+                    "notice.hide_full_access_warning",
+                    serde_json::json!(true),
                 )
                 .await
                 {
@@ -1552,12 +1550,10 @@ impl App {
                 }
             }
             AppEvent::PersistWorldWritableWarningAcknowledged => {
-                if let Err(err) = crate::config_update::write_config_batch(
+                if let Err(err) = crate::config_update::write_config_value(
                     app_server.request_handle(),
-                    vec![crate::config_update::replace_config_value(
-                        "notice.hide_world_writable_warning",
-                        serde_json::json!(true),
-                    )],
+                    "notice.hide_world_writable_warning",
+                    serde_json::json!(true),
                 )
                 .await
                 {
@@ -1571,12 +1567,10 @@ impl App {
                 }
             }
             AppEvent::PersistRateLimitSwitchPromptHidden => {
-                if let Err(err) = crate::config_update::write_config_batch(
+                if let Err(err) = crate::config_update::write_config_value(
                     app_server.request_handle(),
-                    vec![crate::config_update::replace_config_value(
-                        "notice.hide_rate_limit_model_nudge",
-                        serde_json::json!(true),
-                    )],
+                    "notice.hide_rate_limit_model_nudge",
+                    serde_json::json!(true),
                 )
                 .await
                 {
@@ -1630,12 +1624,10 @@ impl App {
             } => {
                 let mut migration_update = serde_json::Map::new();
                 migration_update.insert(from_model, serde_json::json!(to_model));
-                if let Err(err) = crate::config_update::write_config_batch(
+                if let Err(err) = crate::config_update::write_upsert_config_value(
                     app_server.request_handle(),
-                    vec![crate::config_update::upsert_config_value(
-                        "notice.model_migrations",
-                        serde_json::Value::Object(migration_update),
-                    )],
+                    "notice.model_migrations",
+                    serde_json::Value::Object(migration_update),
                 )
                 .await
                 {
