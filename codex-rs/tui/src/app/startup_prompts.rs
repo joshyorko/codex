@@ -220,13 +220,12 @@ pub(super) async fn prepare_startup_tooltip_override(
     let (tooltip_override, updated_shown_count) =
         next_startup_tooltip_override(config, available_models, is_first_run)?;
 
-    if let Err(err) = crate::config_rpc::write_config_batch(
+    if let Err(err) = crate::config_update::write_config_batch(
         app_server.request_handle(),
-        vec![crate::config_rpc::replace_config_value(
+        vec![crate::config_update::replace_config_value(
             "tui.model_availability_nux",
             serde_json::json!(updated_shown_count),
         )],
-        /*reload_user_config*/ true,
     )
     .await
     {

@@ -115,7 +115,7 @@ mod clipboard_copy;
 mod clipboard_paste;
 mod collaboration_modes;
 mod color;
-mod config_rpc;
+mod config_update;
 pub(crate) mod custom_terminal;
 mod pets;
 pub use custom_terminal::Terminal;
@@ -1287,13 +1287,12 @@ async fn run_ratatui_app(
         let Some(app_server) = app_server.as_ref() else {
             unreachable!("app server should exist before OSS provider persistence");
         };
-        if let Err(err) = crate::config_rpc::write_config_batch(
+        if let Err(err) = crate::config_update::write_config_batch(
             app_server.request_handle(),
-            vec![crate::config_rpc::replace_config_value(
+            vec![crate::config_update::replace_config_value(
                 "oss_provider",
                 serde_json::json!(provider),
             )],
-            /*reload_user_config*/ true,
         )
         .await
         {
@@ -1364,13 +1363,12 @@ async fn run_ratatui_app(
             let Some(app_server) = app_server.as_ref() else {
                 unreachable!("app server should exist while onboarding is active");
             };
-            if let Err(err) = crate::config_rpc::write_config_batch(
+            if let Err(err) = crate::config_update::write_config_batch(
                 app_server.request_handle(),
-                vec![crate::config_rpc::upsert_config_value(
+                vec![crate::config_update::upsert_config_value(
                     "projects",
                     serde_json::Value::Object(project_update),
                 )],
-                /*reload_user_config*/ true,
             )
             .await
             {

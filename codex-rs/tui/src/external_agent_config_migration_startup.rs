@@ -148,13 +148,12 @@ async fn persist_external_agent_config_migration_prompt_shown(
         return Ok(());
     }
 
-    crate::config_rpc::write_config_batch(
+    crate::config_update::write_config_batch(
         app_server.request_handle(),
-        vec![crate::config_rpc::upsert_config_value(
+        vec![crate::config_update::upsert_config_value(
             "notice.external_config_migration_prompts",
             serde_json::Value::Object(prompt_update),
         )],
-        /*reload_user_config*/ true,
     )
     .await
     .wrap_err("Failed to save external config migration prompt timestamp")?;
@@ -226,13 +225,12 @@ async fn persist_external_agent_config_migration_prompt_dismissal(
         return Ok(());
     }
 
-    crate::config_rpc::write_config_batch(
+    crate::config_update::write_config_batch(
         app_server.request_handle(),
-        vec![crate::config_rpc::upsert_config_value(
+        vec![crate::config_update::upsert_config_value(
             "notice.external_config_migration_prompts",
             serde_json::Value::Object(prompt_update),
         )],
-        /*reload_user_config*/ true,
     )
     .await
     .wrap_err("Failed to save external config migration prompt preference")?;
