@@ -606,6 +606,25 @@ fn active_turn_steer_race(error: &TypedRequestError) -> Option<ActiveTurnSteerRa
     Some(ActiveTurnSteerRace::ExpectedTurnMismatch { actual_turn_id })
 }
 
+fn active_turn_interrupt_race(error: &TypedRequestError) -> Option<String> {
+    let TypedRequestError::Server { method, source } = error else {
+        return None;
+    };
+    if method != "turn/interrupt" {
+        return None;
+    }
+    let mismatch_prefix = "expected active turn id ";
+    let mismatch_separator = " but found ";
+    Some(
+        source
+            .message
+            .strip_prefix(mismatch_prefix)?
+            .split_once(mismatch_separator)?
+            .1
+            .to_string(),
+    )
+}
+
 impl App {
     pub fn chatwidget_init_for_forked_or_resumed_thread(
         &self,
