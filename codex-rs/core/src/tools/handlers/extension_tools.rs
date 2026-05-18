@@ -39,13 +39,35 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
     }
 
     fn spec(&self) -> Option<ToolSpec> {
-        self.0.spec()
+        let mut spec = self.0.spec()?;
+        if self.0.exposure() == ToolExposure::Deferred {
+            match &mut spec {
+                ToolSpec::Function(tool) => {
+                    tool.defer_loading = None;
+                }
+                ToolSpec::Namespace(namespace) => {
+                    for tool in &mut namespace.tools {
+                        let codex_tools::ResponsesApiNamespaceTool::Function(tool) = tool;
+                        tool.defer_loading = None;
+                    }
+                }
+                ToolSpec::ToolSearch { .. }
+                | ToolSpec::ImageGeneration { .. }
+                | ToolSpec::WebSearch { .. }
+                | ToolSpec::Freeform(_) => {}
+            }
+        }
+        Some(spec)
     }
 
     fn exposure(&self) -> ToolExposure {
         // Extension tools do not yet provide search metadata, so keep them in
         // the model-visible list even if the shared executor requests deferral.
-        ToolExposure::Direct
+        match self.0.exposure() {
+            ToolExposure::Direct => ToolExposure::Direct,
+            ToolExposure::Deferred => ToolExposure::Direct,
+            ToolExposure::DirectModelOnly => ToolExposure::DirectModelOnly,
+        }
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {

@@ -77,7 +77,14 @@ fn extension_tool_executor(
     name: &str,
     description: &str,
 ) -> Arc<dyn ToolExecutor<ExtensionToolCall>> {
-    extension_tool_executor_with_exposure(name, description, codex_tools::ToolExposure::Direct)
+    extension_tool_executor_with_options(
+        name,
+        description,
+        ExtensionToolExecutorOptions {
+            exposure: codex_tools::ToolExposure::Direct,
+            defer_loading: None,
+        },
+    )
 }
 
 fn extension_tool_executor_with_exposure(
@@ -85,10 +92,31 @@ fn extension_tool_executor_with_exposure(
     description: &str,
     exposure: codex_tools::ToolExposure,
 ) -> Arc<dyn ToolExecutor<ExtensionToolCall>> {
+    extension_tool_executor_with_options(
+        name,
+        description,
+        ExtensionToolExecutorOptions {
+            exposure,
+            defer_loading: None,
+        },
+    )
+}
+
+struct ExtensionToolExecutorOptions {
+    exposure: codex_tools::ToolExposure,
+    defer_loading: Option<bool>,
+}
+
+fn extension_tool_executor_with_options(
+    name: &str,
+    description: &str,
+    options: ExtensionToolExecutorOptions,
+) -> Arc<dyn ToolExecutor<ExtensionToolCall>> {
     struct SpecOnlyExtensionExecutor {
         name: String,
         description: String,
         exposure: codex_tools::ToolExposure,
+        defer_loading: Option<bool>,
     }
 
     #[async_trait::async_trait]
@@ -111,7 +139,7 @@ fn extension_tool_executor_with_exposure(
                     Some(false.into()),
                 ),
                 output_schema: None,
-                defer_loading: None,
+                defer_loading: self.defer_loading,
             }))
         }
 
@@ -130,7 +158,8 @@ fn extension_tool_executor_with_exposure(
     Arc::new(SpecOnlyExtensionExecutor {
         name: name.to_string(),
         description: description.to_string(),
-        exposure,
+        exposure: options.exposure,
+        defer_loading: options.defer_loading,
     })
 }
 
@@ -190,11 +219,26 @@ fn deferred_extension_tools_remain_model_visible() {
         permission_profile: &PermissionProfile::Disabled,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     });
-    let extension_tool_executors = vec![extension_tool_executor_with_exposure(
-        "extension_echo",
-        "Echoes arguments through an extension tool.",
-        codex_tools::ToolExposure::Deferred,
-    )];
+    let extension_tool_executors = vec![
+        extension_tool_executor_with_exposure(
+            "extension_echo",
+            "Echoes arguments through an extension tool.",
+            codex_tools::ToolExposure::Deferred,
+        ),
+        extension_tool_executor_with_options(
+            "extension_lazy",
+            "Lazy extension tool.",
+            ExtensionToolExecutorOptions {
+                exposure: codex_tools::ToolExposure::Deferred,
+                defer_loading: Some(true),
+            },
+        ),
+        extension_tool_executor_with_exposure(
+            "extension_model_only",
+            "Model-only extension tool.",
+            codex_tools::ToolExposure::DirectModelOnly,
+        ),
+    ];
 
     let (tools, registry) = build_specs_with_inputs_for_test(
         &tools_config,
@@ -223,7 +267,31 @@ fn deferred_extension_tools_remain_model_visible() {
             defer_loading: None,
         })
     );
+    assert_eq!(
+        find_tool(&tools, "extension_lazy").clone(),
+        ToolSpec::Function(ResponsesApiTool {
+            name: "extension_lazy".to_string(),
+            description: "Lazy extension tool.".to_string(),
+            strict: true,
+            parameters: JsonSchema::object(
+                BTreeMap::from([(
+                    "message".to_string(),
+                    JsonSchema::string(/*description*/ None),
+                )]),
+                Some(vec!["message".to_string()]),
+                Some(false.into()),
+            ),
+            output_schema: None,
+            defer_loading: None,
+        })
+    );
+    assert_eq!(
+        registry.tool_exposure(&ToolName::plain("extension_model_only")),
+        Some(codex_tools::ToolExposure::DirectModelOnly)
+    );
     assert!(registry.has_tool(&ToolName::plain("extension_echo")));
+    assert!(registry.has_tool(&ToolName::plain("extension_lazy")));
+    assert!(registry.has_tool(&ToolName::plain("extension_model_only")));
     assert_lacks_tool_name(&tools, TOOL_SEARCH_TOOL_NAME);
 }
 
