@@ -1929,7 +1929,7 @@ impl ThreadRequestProcessor {
                 &self.config.cwd,
             );
             status_ids.push(thread.id.clone());
-            results.push((thread, result.search_preview));
+            results.push((thread, result.snippet));
         }
         let statuses = self
             .thread_watch_manager
@@ -1937,13 +1937,13 @@ impl ThreadRequestProcessor {
             .await;
         let data = results
             .into_iter()
-            .map(|(mut thread, search_preview)| {
+            .map(|(mut thread, snippet)| {
                 if let Some(status) = statuses.get(&thread.id) {
                     thread.status = status.clone();
                 }
                 ThreadSearchResult {
                     thread,
-                    search_preview: thread_search_preview_from_rollout(search_preview),
+                    search_preview: ThreadSearchPreview::ContentMatch { snippet },
                 }
             })
             .collect();
@@ -3876,16 +3876,6 @@ pub(crate) fn thread_from_stored_thread(
         turns: Vec::new(),
     };
     (thread, history)
-}
-
-fn thread_search_preview_from_rollout(
-    preview: codex_rollout::ThreadSearchPreview,
-) -> codex_app_server_protocol::ThreadSearchPreview {
-    match preview {
-        codex_rollout::ThreadSearchPreview::ContentMatch { snippet } => {
-            codex_app_server_protocol::ThreadSearchPreview::ContentMatch { snippet }
-        }
-    }
 }
 
 fn summary_from_stored_thread(
