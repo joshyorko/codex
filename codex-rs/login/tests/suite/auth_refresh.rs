@@ -19,6 +19,7 @@ use pretty_assertions::assert_eq;
 use serde::Serialize;
 use serde_json::json;
 use std::ffi::OsString;
+use std::fs::File;
 use std::sync::Arc;
 use tempfile::TempDir;
 use wiremock::Mock;
@@ -236,6 +237,49 @@ async fn refresh_managed_chatgpt_token_skips_auth_outside_refresh_window() -> Re
         .refresh_managed_chatgpt_token_if_near_expiry()
         .await
         .context("managed ChatGPT refresh should no-op")?;
+
+    assert_eq!(ctx.load_auth()?, initial_auth);
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert!(requests.is_empty(), "expected no refresh token requests");
+
+    Ok(())
+}
+
+#[serial_test::serial(auth_refresh)]
+#[tokio::test]
+async fn refresh_managed_chatgpt_token_skips_while_startup_refresh_lock_is_held() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    let ctx = RefreshTokenTestContext::new(&server).await?;
+    let initial_last_refresh = Utc::now();
+    let near_expiry_access_token = access_token_with_expiration(Utc::now() + Duration::minutes(4));
+    let initial_tokens = build_tokens(&near_expiry_access_token, INITIAL_REFRESH_TOKEN);
+    let initial_auth = AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(initial_tokens.clone()),
+        last_refresh: Some(initial_last_refresh),
+        agent_identity: None,
+    };
+    ctx.write_auth(&initial_auth).await?;
+
+    let lock_path = ctx
+        .codex_home
+        .path()
+        .join("chatgpt-access-token-startup-refresh.lock");
+    let lock_file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    lock_file.try_lock()?;
+
+    ctx.auth_manager
+        .refresh_managed_chatgpt_token_if_near_expiry()
+        .await
+        .context("managed ChatGPT refresh should skip while another startup holds the lock")?;
 
     assert_eq!(ctx.load_auth()?, initial_auth);
     let requests = server.received_requests().await.unwrap_or_default();

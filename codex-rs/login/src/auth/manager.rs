@@ -7,6 +7,10 @@ use serde::Serialize;
 use serial_test::serial;
 use std::env;
 use std::fmt::Debug;
+use std::fs::File;
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -84,6 +88,8 @@ struct ChatgptAuthState {
 
 const TOKEN_REFRESH_INTERVAL: i64 = 8;
 const CHATGPT_ACCESS_TOKEN_REFRESH_WINDOW_MINUTES: i64 = 5;
+const CHATGPT_ACCESS_TOKEN_STARTUP_REFRESH_LOCK_FILENAME: &str =
+    "chatgpt-access-token-startup-refresh.lock";
 
 const REFRESH_TOKEN_EXPIRED_MESSAGE: &str = "Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.";
 const REFRESH_TOKEN_REUSED_MESSAGE: &str = "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.";
@@ -1722,7 +1728,42 @@ impl AuthManager {
             return Ok(());
         }
 
+        let _refresh_lock = match self.try_acquire_chatgpt_startup_refresh_lock()? {
+            Some(lock_file) => lock_file,
+            None => {
+                tracing::info!(
+                    "Skipping proactive ChatGPT access token refresh because another process is already refreshing it."
+                );
+                return Ok(());
+            }
+        };
+
         self.refresh_token().await
+    }
+
+    fn try_acquire_chatgpt_startup_refresh_lock(&self) -> Result<Option<File>, RefreshTokenError> {
+        let lock_path = self
+            .codex_home
+            .join(CHATGPT_ACCESS_TOKEN_STARTUP_REFRESH_LOCK_FILENAME);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).map_err(RefreshTokenError::Transient)?;
+        }
+
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let lock_file = options
+            .open(lock_path)
+            .map_err(RefreshTokenError::Transient)?;
+
+        match lock_file.try_lock() {
+            Ok(()) => Ok(Some(lock_file)),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(err) => Err(RefreshTokenError::Transient(err.into())),
+        }
     }
 
     /// Attempt to refresh the current auth token from the authority that issued
