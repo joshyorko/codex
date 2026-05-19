@@ -52,10 +52,7 @@ impl ExecutorFileSystem for RemoteFileSystem {
         };
         let response = self
             .client
-            .request(|client| {
-                let params = params.clone();
-                async move { client.fs_read_file(params).await }
-            })
+            .fs_read_file(params)
             .await
             .map_err(map_remote_error)?;
         STANDARD.decode(response.data_base64).map_err(|err| {
@@ -79,10 +76,7 @@ impl ExecutorFileSystem for RemoteFileSystem {
             sandbox: remote_sandbox_context(sandbox),
         };
         self.client
-            .request(|client| {
-                let params = params.clone();
-                async move { client.fs_write_file(params).await }
-            })
+            .fs_write_file(params)
             .await
             .map_err(map_remote_error)?;
         Ok(())
@@ -101,10 +95,7 @@ impl ExecutorFileSystem for RemoteFileSystem {
             sandbox: remote_sandbox_context(sandbox),
         };
         self.client
-            .request(|client| {
-                let params = params.clone();
-                async move { client.fs_create_directory(params).await }
-            })
+            .fs_create_directory(params)
             .await
             .map_err(map_remote_error)?;
         Ok(())
@@ -122,10 +113,7 @@ impl ExecutorFileSystem for RemoteFileSystem {
         };
         let response = self
             .client
-            .request(|client| {
-                let params = params.clone();
-                async move { client.fs_get_metadata(params).await }
-            })
+            .fs_get_metadata(params)
             .await
             .map_err(map_remote_error)?;
         Ok(FileMetadata {
@@ -149,10 +137,7 @@ impl ExecutorFileSystem for RemoteFileSystem {
         };
         let response = self
             .client
-            .request(|client| {
-                let params = params.clone();
-                async move { client.fs_read_directory(params).await }
-            })
+            .fs_read_directory(params)
             .await
             .map_err(map_remote_error)?;
         Ok(response
@@ -180,10 +165,7 @@ impl ExecutorFileSystem for RemoteFileSystem {
             sandbox: remote_sandbox_context(sandbox),
         };
         self.client
-            .request(|client| {
-                let params = params.clone();
-                async move { client.fs_remove(params).await }
-            })
+            .fs_remove(params)
             .await
             .map_err(map_remote_error)?;
         Ok(())
@@ -204,10 +186,7 @@ impl ExecutorFileSystem for RemoteFileSystem {
             sandbox: remote_sandbox_context(sandbox),
         };
         self.client
-            .request(|client| {
-                let params = params.clone();
-                async move { client.fs_copy(params).await }
-            })
+            .fs_copy(params)
             .await
             .map_err(map_remote_error)?;
         Ok(())

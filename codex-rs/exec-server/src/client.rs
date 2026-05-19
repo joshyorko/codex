@@ -322,6 +322,68 @@ impl RemoteExecServerClient {
         }
     }
 
+    async fn call<P, T>(&self, method: &str, params: P) -> Result<T, ExecServerError>
+    where
+        P: serde::Serialize + Clone,
+        T: serde::de::DeserializeOwned,
+    {
+        self.request(|client| {
+            let method = method.to_string();
+            let params = params.clone();
+            async move { client.call(&method, &params).await }
+        })
+        .await
+    }
+
+    pub(crate) async fn fs_read_file(
+        &self,
+        params: FsReadFileParams,
+    ) -> Result<FsReadFileResponse, ExecServerError> {
+        self.call(FS_READ_FILE_METHOD, params).await
+    }
+
+    pub(crate) async fn fs_write_file(
+        &self,
+        params: FsWriteFileParams,
+    ) -> Result<FsWriteFileResponse, ExecServerError> {
+        self.call(FS_WRITE_FILE_METHOD, params).await
+    }
+
+    pub(crate) async fn fs_create_directory(
+        &self,
+        params: FsCreateDirectoryParams,
+    ) -> Result<FsCreateDirectoryResponse, ExecServerError> {
+        self.call(FS_CREATE_DIRECTORY_METHOD, params).await
+    }
+
+    pub(crate) async fn fs_get_metadata(
+        &self,
+        params: FsGetMetadataParams,
+    ) -> Result<FsGetMetadataResponse, ExecServerError> {
+        self.call(FS_GET_METADATA_METHOD, params).await
+    }
+
+    pub(crate) async fn fs_read_directory(
+        &self,
+        params: FsReadDirectoryParams,
+    ) -> Result<FsReadDirectoryResponse, ExecServerError> {
+        self.call(FS_READ_DIRECTORY_METHOD, params).await
+    }
+
+    pub(crate) async fn fs_remove(
+        &self,
+        params: FsRemoveParams,
+    ) -> Result<FsRemoveResponse, ExecServerError> {
+        self.call(FS_REMOVE_METHOD, params).await
+    }
+
+    pub(crate) async fn fs_copy(
+        &self,
+        params: FsCopyParams,
+    ) -> Result<FsCopyResponse, ExecServerError> {
+        self.call(FS_COPY_METHOD, params).await
+    }
+
     async fn reconnect_websocket(
         &self,
         session_id: String,
