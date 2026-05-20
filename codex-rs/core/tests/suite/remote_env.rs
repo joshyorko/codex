@@ -50,6 +50,7 @@ use std::process::Command;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use tempfile::TempDir;
+use url::Url;
 async fn unified_exec_test(server: &wiremock::MockServer) -> Result<TestCodex> {
     let mut builder = test_codex().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
@@ -187,7 +188,10 @@ async fn remote_test_env_reconnects_after_exec_server_websocket_disconnect() -> 
     file_system
         .write_file(&file_path_abs, payload.clone(), /*sandbox*/ None)
         .await?;
-    remote_exec("ss -K state established '( sport = :31987 )'")?;
+    remote_exec(&format!(
+        "ss -K state established '( sport = :{} )'",
+        remote_exec_server_port()?
+    ))?;
 
     let actual = file_system
         .read_file(&file_path_abs, /*sandbox*/ None)
@@ -272,6 +276,14 @@ fn remote_exec(script: &str) -> Result<()> {
         String::from_utf8_lossy(&output.stderr).trim(),
     );
     Ok(())
+}
+
+fn remote_exec_server_port() -> Result<u16> {
+    let websocket_url = std::env::var("CODEX_TEST_REMOTE_EXEC_SERVER_URL")
+        .context("CODEX_TEST_REMOTE_EXEC_SERVER_URL must be set for remote reconnect test")?;
+    Url::parse(&websocket_url)?
+        .port_or_known_default()
+        .context("remote exec-server websocket URL should include a port")
 }
 
 async fn exec_command_routing_output(
