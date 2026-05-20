@@ -1864,7 +1864,7 @@ mod tests {
             initialize_timeout: Duration::from_secs(1),
         });
         let process = RemoteProcess::new(client);
-        let err = process
+        let err = match process
             .start(ExecParams {
                 process_id: ProcessId::from("process-1"),
                 argv: vec!["true".to_string()],
@@ -1876,7 +1876,10 @@ mod tests {
                 arg0: None,
             })
             .await
-            .expect_err("exec start should surface disconnect");
+        {
+            Ok(_) => panic!("exec start should surface disconnect"),
+            Err(err) => err,
+        };
         assert!(matches!(
             err,
             ExecServerError::Closed | ExecServerError::Disconnected(_)
