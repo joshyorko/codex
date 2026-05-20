@@ -370,7 +370,6 @@ impl LazyRemoteExecServerClient {
         self.get().await?.call(method, params).await
     }
 
-    #[cfg(test)]
     pub(crate) async fn register_session(
         &self,
         process_id: &ProcessId,
@@ -575,6 +574,7 @@ impl ExecServerClient {
         self.call(FS_COPY_METHOD, &params).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn register_session(
         &self,
         process_id: &ProcessId,
