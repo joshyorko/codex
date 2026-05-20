@@ -14,11 +14,20 @@ use codex_app_server_daemon::RemoteControlReadyStatus as AppServerRemoteControlR
 use codex_app_server_daemon::RemoteControlStartOutput as AppServerRemoteControlStartOutput;
 use codex_app_server_protocol::RemoteControlConnectionStatus;
 use codex_arg0::Arg0DispatchPaths;
+use codex_core::config::Config;
 use codex_config::LoaderOverrides;
+use codex_login::AuthDotJson;
+use codex_login::load_auth_dot_json;
 use codex_protocol::protocol::SessionSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::CliConfigOverrides;
+use reqwest::header::HeaderMap;
+use reqwest::header::HeaderValue;
+use reqwest::header::AUTHORIZATION;
+use reqwest::header::USER_AGENT;
+use serde::Deserialize;
 use serde::Serialize;
+use std::io::IsTerminal;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -26,6 +35,9 @@ use tokio::time::timeout;
 const FOREGROUND_SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const FOREGROUND_SOCKET_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(50);
 const FOREGROUND_APP_SERVER_ABORT_TIMEOUT: Duration = Duration::from_secs(1);
+const REMOTE_CONTROL_HOSTS_LIMIT: usize = 100;
+const CHATGPT_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
+const ORIGINATOR_HEADER: &str = "originator";
 
 #[derive(Debug, Args)]
 pub(crate) struct RemoteControlCommand {
@@ -39,21 +51,59 @@ pub(crate) struct RemoteControlCommand {
 
 impl RemoteControlCommand {
     pub(crate) fn subcommand_name(&self) -> &'static str {
-        match self.subcommand {
+        match &self.subcommand {
             None => "remote-control",
             Some(RemoteControlSubcommand::Start) => "remote-control start",
             Some(RemoteControlSubcommand::Stop) => "remote-control stop",
+            Some(RemoteControlSubcommand::Hosts(_)) => "remote-control hosts",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, clap::Subcommand)]
+#[derive(Debug, clap::Subcommand)]
 enum RemoteControlSubcommand {
     /// Start the app-server daemon with remote control enabled.
     Start,
 
     /// Stop the app-server daemon.
     Stop,
+
+    /// List and remove remote-control hosts.
+    Hosts(RemoteControlHostsCommand),
+}
+
+#[derive(Debug, Args)]
+struct RemoteControlHostsCommand {
+    /// Only show hosts that are not currently online.
+    #[arg(long)]
+    stale: bool,
+
+    /// Allow deletion of hosts that are currently online.
+    #[arg(long = "include-online")]
+    include_online: bool,
+
+    #[command(subcommand)]
+    subcommand: Option<RemoteControlHostsSubcommand>,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum RemoteControlHostsSubcommand {
+    /// Print registered remote-control hosts.
+    List,
+
+    /// Delete a registered remote-control host by environment id.
+    Delete {
+        /// Environment id to delete.
+        environment_id: String,
+
+        /// Allow deletion if the host is currently online.
+        #[arg(long = "include-online")]
+        include_online: bool,
+
+        /// Confirm deletion without an interactive prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 pub(crate) async fn run(
@@ -81,6 +131,9 @@ pub(crate) async fn run(
             print_remote_control_progress(command.json, "Stopping remote control...")?;
             let output = codex_app_server_daemon::run(AppServerLifecycleCommand::Stop).await?;
             print_remote_control_stop_output(&output, command.json)?;
+        }
+        Some(RemoteControlSubcommand::Hosts(hosts_command)) => {
+            run_remote_control_hosts(command.json, hosts_command, root_config_overrides).await?;
         }
     }
     Ok(())
@@ -467,6 +520,416 @@ fn remote_control_stop_human_message(output: &AppServerLifecycleOutput) -> Strin
     }
 }
 
+async fn run_remote_control_hosts(
+    json: bool,
+    command: RemoteControlHostsCommand,
+    root_config_overrides: CliConfigOverrides,
+) -> anyhow::Result<()> {
+    let client = RemoteControlHostsClient::new(root_config_overrides).await?;
+    match command.subcommand {
+        Some(RemoteControlHostsSubcommand::List) => {
+            let hosts = client.list_hosts().await?;
+            print_remote_control_hosts(&hosts, command.stale, json)?;
+        }
+        Some(RemoteControlHostsSubcommand::Delete {
+            environment_id,
+            include_online,
+            yes,
+        }) => {
+            delete_remote_control_host(
+                &client,
+                &environment_id,
+                command.include_online || include_online,
+                yes,
+                json,
+            )
+            .await?;
+        }
+        None => {
+            let hosts = client.list_hosts().await?;
+            if json {
+                print_remote_control_hosts(&hosts, command.stale, true)?;
+            } else {
+                interactive_remote_control_hosts(
+                    &client,
+                    hosts,
+                    command.stale,
+                    command.include_online,
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+struct RemoteControlHostsClient {
+    http: reqwest::Client,
+    base_url: String,
+}
+
+impl RemoteControlHostsClient {
+    async fn new(root_config_overrides: CliConfigOverrides) -> anyhow::Result<Self> {
+        let config = Config::load_with_cli_overrides(root_config_overrides.parse_overrides()?)
+            .await
+            .context("failed to load Codex config")?;
+        let auth = load_auth_dot_json(&config.codex_home, config.cli_auth_credentials_store_mode)
+            .context("failed to load Codex auth credentials")?
+            .context("codex remote-control hosts requires ChatGPT login")?;
+        let headers = remote_control_hosts_headers(&auth)?;
+        let http = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .context("failed to build remote-control hosts HTTP client")?;
+        Ok(Self {
+            http,
+            base_url: config.chatgpt_base_url.trim_end_matches('/').to_string(),
+        })
+    }
+
+    async fn list_hosts(&self) -> anyhow::Result<Vec<RemoteControlHost>> {
+        let url = format!(
+            "{}/codex/remote/control/environments?limit={}",
+            self.base_url, REMOTE_CONTROL_HOSTS_LIMIT
+        );
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .context("failed to request remote-control hosts")?
+            .error_for_status()
+            .context("remote-control hosts request failed")?;
+        let body: RemoteControlHostsResponse = response
+            .json()
+            .await
+            .context("failed to decode remote-control hosts response")?;
+        Ok(body.items)
+    }
+
+    async fn delete_host(&self, environment_id: &str) -> anyhow::Result<()> {
+        let url = format!(
+            "{}/codex/remote/control/environments/{}",
+            self.base_url,
+            percent_encode_path_segment(environment_id)
+        );
+        self.http
+            .delete(url)
+            .send()
+            .await
+            .context("failed to delete remote-control host")?
+            .error_for_status()
+            .context("remote-control host delete failed")?;
+        Ok(())
+    }
+}
+
+fn remote_control_hosts_headers(auth: &AuthDotJson) -> anyhow::Result<HeaderMap> {
+    let tokens = auth
+        .tokens
+        .as_ref()
+        .context("codex remote-control hosts requires ChatGPT login")?;
+    let mut headers = HeaderMap::new();
+    let auth_header = HeaderValue::from_str(&format!("Bearer {}", tokens.access_token))
+        .context("failed to build authorization header")?;
+    headers.insert(AUTHORIZATION, auth_header);
+    headers.insert(USER_AGENT, HeaderValue::from_static("Codex CLI"));
+    headers.insert(
+        ORIGINATOR_HEADER,
+        HeaderValue::from_static("Codex CLI remote-control hosts"),
+    );
+    if let Some(account_id) = tokens
+        .account_id
+        .as_deref()
+        .or(tokens.id_token.chatgpt_account_id.as_deref())
+    {
+        headers.insert(
+            CHATGPT_ACCOUNT_ID_HEADER,
+            HeaderValue::from_str(account_id).context("failed to build account header")?,
+        );
+    }
+    Ok(headers)
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteControlHost {
+    #[serde(alias = "env_id")]
+    env_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, alias = "display_name")]
+    display_name: Option<String>,
+    #[serde(default, alias = "host_name")]
+    host_name: Option<String>,
+    #[serde(default, alias = "client_type")]
+    client_type: Option<String>,
+    #[serde(default)]
+    online: Option<bool>,
+    #[serde(default)]
+    busy: Option<bool>,
+    #[serde(default, alias = "last_seen_at")]
+    last_seen_at: Option<String>,
+    #[serde(default, alias = "installation_id")]
+    installation_id: Option<String>,
+    #[serde(default)]
+    os: Option<String>,
+    #[serde(default)]
+    arch: Option<String>,
+    #[serde(default, alias = "app_server_version")]
+    app_server_version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteControlHostsResponse {
+    #[serde(default, alias = "data")]
+    items: Vec<RemoteControlHost>,
+}
+
+impl RemoteControlHost {
+    fn display_name(&self) -> &str {
+        self.display_name
+            .as_deref()
+            .or(self.name.as_deref())
+            .or(self.host_name.as_deref())
+            .unwrap_or("(unnamed)")
+    }
+
+    fn is_online(&self) -> bool {
+        self.online.unwrap_or(false)
+    }
+
+    fn status_label(&self) -> &'static str {
+        match (self.is_online(), self.busy.unwrap_or(false)) {
+            (true, true) => "online/busy",
+            (true, false) => "online",
+            (false, _) => "offline",
+        }
+    }
+
+    fn client_label(&self) -> &str {
+        self.client_type.as_deref().unwrap_or("unknown")
+    }
+
+    fn last_seen_label(&self) -> &str {
+        self.last_seen_at.as_deref().unwrap_or("never")
+    }
+}
+
+fn filtered_remote_control_hosts(
+    hosts: &[RemoteControlHost],
+    stale_only: bool,
+) -> Vec<&RemoteControlHost> {
+    hosts
+        .iter()
+        .filter(|host| !stale_only || !host.is_online())
+        .collect()
+}
+
+fn print_remote_control_hosts(
+    hosts: &[RemoteControlHost],
+    stale_only: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let filtered = filtered_remote_control_hosts(hosts, stale_only);
+    if json {
+        println!("{}", serde_json::to_string(&filtered)?);
+        return Ok(());
+    }
+
+    if filtered.is_empty() {
+        println!("No remote-control hosts found.");
+        return Ok(());
+    }
+
+    for line in remote_control_hosts_table_lines(&filtered) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn remote_control_hosts_table_lines(hosts: &[&RemoteControlHost]) -> Vec<String> {
+    let mut lines = Vec::with_capacity(hosts.len() + 1);
+    lines.push(format!(
+        "{:<3} {:<28} {:<12} {:<14} {:<24} {}",
+        "#", "Name", "Status", "Client", "Last seen", "Environment"
+    ));
+    for (index, host) in hosts.iter().enumerate() {
+        lines.push(format!(
+            "{:<3} {:<28} {:<12} {:<14} {:<24} {}",
+            index + 1,
+            truncate_for_table(host.display_name(), 28),
+            host.status_label(),
+            truncate_for_table(host.client_label(), 14),
+            truncate_for_table(host.last_seen_label(), 24),
+            host.env_id
+        ));
+    }
+    lines
+}
+
+fn truncate_for_table(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    let mut out = value
+        .chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>();
+    out.push('…');
+    out
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    encoded
+}
+
+async fn interactive_remote_control_hosts(
+    client: &RemoteControlHostsClient,
+    mut hosts: Vec<RemoteControlHost>,
+    mut stale_only: bool,
+    mut include_online: bool,
+) -> anyhow::Result<()> {
+    if !std::io::stdin().is_terminal() {
+        print_remote_control_hosts(&hosts, stale_only, false)?;
+        return Ok(());
+    }
+
+    loop {
+        println!();
+        println!("Remote-control hosts");
+        println!(
+            "  filter: {}   online delete: {}",
+            if stale_only { "stale only" } else { "all" },
+            if include_online { "unlocked" } else { "locked" }
+        );
+        let filtered = filtered_remote_control_hosts(&hosts, stale_only);
+        if filtered.is_empty() {
+            println!("No remote-control hosts found.");
+        } else {
+            for line in remote_control_hosts_table_lines(&filtered) {
+                println!("{line}");
+            }
+        }
+        println!();
+        println!("Enter host number to delete, f filter, o online lock, r refresh, q quit:");
+        print!("> ");
+        std::io::stdout().flush()?;
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+        match input {
+            "" | "q" | "quit" => return Ok(()),
+            "f" => {
+                stale_only = !stale_only;
+            }
+            "o" => {
+                include_online = !include_online;
+            }
+            "r" => {
+                hosts = client.list_hosts().await?;
+            }
+            selection => {
+                let index = match selection.parse::<usize>() {
+                    Ok(index) => index,
+                    Err(_) => {
+                        println!("Unrecognized selection: {selection}");
+                        continue;
+                    }
+                };
+                if index == 0 || index > filtered.len() {
+                    println!("Host selection out of range.");
+                    continue;
+                }
+                let host = (*filtered[index - 1]).clone();
+                confirm_and_delete_remote_control_host(client, &host, include_online).await?;
+                hosts = client.list_hosts().await?;
+            }
+        }
+    }
+}
+
+async fn delete_remote_control_host(
+    client: &RemoteControlHostsClient,
+    environment_id: &str,
+    include_online: bool,
+    yes: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let hosts = client.list_hosts().await?;
+    let host = hosts
+        .iter()
+        .find(|host| host.env_id == environment_id)
+        .with_context(|| format!("Remote-control host {environment_id} was not found."))?;
+    ensure_remote_control_host_deletable(host, include_online)?;
+    if !yes {
+        anyhow::bail!("Refusing to delete without --yes.");
+    }
+    client.delete_host(environment_id).await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "deleted": true,
+                "environmentId": environment_id,
+            }))?
+        );
+    } else {
+        println!("Deleted remote-control host {environment_id}.");
+    }
+    Ok(())
+}
+
+async fn confirm_and_delete_remote_control_host(
+    client: &RemoteControlHostsClient,
+    host: &RemoteControlHost,
+    include_online: bool,
+) -> anyhow::Result<()> {
+    ensure_remote_control_host_deletable(host, include_online)?;
+    println!();
+    println!("Delete {}?", host.display_name());
+    println!("  status: {}", host.status_label());
+    println!("  last seen: {}", host.last_seen_label());
+    println!("  environment: {}", host.env_id);
+    println!("Type the environment id to confirm:");
+    print!("> ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    if input.trim() != host.env_id {
+        println!("Delete cancelled.");
+        return Ok(());
+    }
+    client.delete_host(&host.env_id).await?;
+    println!("Deleted remote-control host {}.", host.env_id);
+    Ok(())
+}
+
+fn ensure_remote_control_host_deletable(
+    host: &RemoteControlHost,
+    include_online: bool,
+) -> anyhow::Result<()> {
+    if host.is_online() && !include_online {
+        anyhow::bail!(
+            "Refusing to delete online host {}. Re-run with --include-online to unlock online deletion.",
+            host.env_id
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
@@ -627,6 +1090,156 @@ mod tests {
             .to_string(),
             "Remote control is enabled on owen-mbp but the connection is errored."
         );
+    }
+
+    fn test_host(env_id: &str, name: &str, online: bool) -> RemoteControlHost {
+        RemoteControlHost {
+            env_id: env_id.to_string(),
+            name: Some(name.to_string()),
+            display_name: None,
+            host_name: None,
+            client_type: Some("codex_cli".to_string()),
+            online: Some(online),
+            busy: Some(false),
+            last_seen_at: Some("2026-05-20T18:00:00Z".to_string()),
+            installation_id: None,
+            os: Some("linux".to_string()),
+            arch: Some("x86_64".to_string()),
+            app_server_version: Some("1.0.0".to_string()),
+        }
+    }
+
+    #[test]
+    fn remote_control_hosts_filter_stale_hosts() {
+        let hosts = vec![
+            test_host("env_online", "bluefin", /*online*/ true),
+            test_host("env_offline", "devcontainer", /*online*/ false),
+        ];
+
+        let filtered = filtered_remote_control_hosts(&hosts, /*stale_only*/ true);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].env_id, "env_offline");
+    }
+
+    #[test]
+    fn remote_control_hosts_table_includes_status_and_environment_id() {
+        let hosts = vec![test_host("env_test", "bluefin", /*online*/ true)];
+        let filtered = filtered_remote_control_hosts(&hosts, /*stale_only*/ false);
+
+        assert_eq!(
+            remote_control_hosts_table_lines(&filtered),
+            vec![
+                "#   Name                         Status       Client         Last seen                Environment".to_string(),
+                "1   bluefin                      online       codex_cli      2026-05-20T18:00:00Z     env_test".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_control_hosts_json_uses_camel_case_fields() {
+        let hosts = vec![test_host("env_test", "bluefin", /*online*/ false)];
+        let filtered = filtered_remote_control_hosts(&hosts, /*stale_only*/ true);
+
+        assert_eq!(
+            serde_json::to_value(&filtered).expect("serialize hosts"),
+            json!([
+                {
+                    "envId": "env_test",
+                    "name": "bluefin",
+                    "displayName": null,
+                    "hostName": null,
+                    "clientType": "codex_cli",
+                    "online": false,
+                    "busy": false,
+                    "lastSeenAt": "2026-05-20T18:00:00Z",
+                    "installationId": null,
+                    "os": "linux",
+                    "arch": "x86_64",
+                    "appServerVersion": "1.0.0",
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn remote_control_hosts_response_accepts_data_or_items() {
+        let data_response: RemoteControlHostsResponse = serde_json::from_value(json!({
+            "data": [
+                {
+                    "envId": "env_data",
+                    "name": "bluefin",
+                    "online": false
+                }
+            ]
+        }))
+        .expect("decode data response");
+        let items_response: RemoteControlHostsResponse = serde_json::from_value(json!({
+            "items": [
+                {
+                    "env_id": "env_items",
+                    "display_name": "devcontainer",
+                    "online": true
+                }
+            ]
+        }))
+        .expect("decode items response");
+
+        assert_eq!(
+            (data_response.items, items_response.items),
+            (
+                vec![RemoteControlHost {
+                    env_id: "env_data".to_string(),
+                    name: Some("bluefin".to_string()),
+                    display_name: None,
+                    host_name: None,
+                    client_type: None,
+                    online: Some(false),
+                    busy: None,
+                    last_seen_at: None,
+                    installation_id: None,
+                    os: None,
+                    arch: None,
+                    app_server_version: None,
+                }],
+                vec![RemoteControlHost {
+                    env_id: "env_items".to_string(),
+                    name: None,
+                    display_name: Some("devcontainer".to_string()),
+                    host_name: None,
+                    client_type: None,
+                    online: Some(true),
+                    busy: None,
+                    last_seen_at: None,
+                    installation_id: None,
+                    os: None,
+                    arch: None,
+                    app_server_version: None,
+                }],
+            )
+        );
+    }
+
+    #[test]
+    fn remote_control_hosts_delete_url_escapes_environment_id() {
+        assert_eq!(
+            percent_encode_path_segment("env/with space"),
+            "env%2Fwith%20space"
+        );
+    }
+
+    #[test]
+    fn remote_control_hosts_protect_online_hosts_by_default() {
+        let host = test_host("env_online", "bluefin", /*online*/ true);
+
+        assert_eq!(
+            ensure_remote_control_host_deletable(&host, /*include_online*/ false)
+                .expect_err("online host should be protected")
+                .to_string(),
+            "Refusing to delete online host env_online. Re-run with --include-online to unlock online deletion."
+        );
+        ensure_remote_control_host_deletable(&host, /*include_online*/ true)
+            .expect("include-online unlocks delete");
     }
 
     #[tokio::test]
