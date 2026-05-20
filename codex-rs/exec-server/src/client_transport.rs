@@ -11,6 +11,7 @@ use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
 
 use crate::ExecServerClient;
 use crate::ExecServerError;
+use crate::client::DisconnectSessionPolicy;
 use crate::client_api::RemoteExecServerConnectArgs;
 use crate::client_api::StdioExecServerCommand;
 use crate::client_api::StdioExecServerConnectArgs;
@@ -23,16 +24,18 @@ impl ExecServerClient {
     pub(crate) async fn connect_for_transport(
         transport_params: crate::client_api::ExecServerTransportParams,
     ) -> Result<Self, ExecServerError> {
-        Self::connect_for_transport_with_resume_session_id(
+        Self::connect_for_transport_with_session_policy(
             transport_params,
             /*resume_session_id*/ None,
+            DisconnectSessionPolicy::Fail,
         )
         .await
     }
 
-    pub(crate) async fn connect_for_transport_with_resume_session_id(
+    pub(crate) async fn connect_for_transport_with_session_policy(
         transport_params: crate::client_api::ExecServerTransportParams,
         resume_session_id: Option<String>,
+        disconnect_session_policy: DisconnectSessionPolicy,
     ) -> Result<Self, ExecServerError> {
         match transport_params {
             crate::client_api::ExecServerTransportParams::WebSocketUrl {
@@ -40,13 +43,16 @@ impl ExecServerClient {
                 connect_timeout,
                 initialize_timeout,
             } => {
-                Self::connect_websocket(RemoteExecServerConnectArgs {
-                    websocket_url,
-                    client_name: ENVIRONMENT_CLIENT_NAME.to_string(),
-                    connect_timeout,
-                    initialize_timeout,
-                    resume_session_id,
-                })
+                Self::connect_websocket_with_session_policy(
+                    RemoteExecServerConnectArgs {
+                        websocket_url,
+                        client_name: ENVIRONMENT_CLIENT_NAME.to_string(),
+                        connect_timeout,
+                        initialize_timeout,
+                        resume_session_id,
+                    },
+                    disconnect_session_policy,
+                )
                 .await
             }
             crate::client_api::ExecServerTransportParams::StdioCommand {
@@ -66,6 +72,13 @@ impl ExecServerClient {
 
     pub async fn connect_websocket(
         args: RemoteExecServerConnectArgs,
+    ) -> Result<Self, ExecServerError> {
+        Self::connect_websocket_with_session_policy(args, DisconnectSessionPolicy::Fail).await
+    }
+
+    async fn connect_websocket_with_session_policy(
+        args: RemoteExecServerConnectArgs,
+        disconnect_session_policy: DisconnectSessionPolicy,
     ) -> Result<Self, ExecServerError> {
         ensure_rustls_crypto_provider();
         let websocket_url = args.websocket_url.clone();
@@ -87,7 +100,7 @@ impl ExecServerClient {
         } else {
             JsonRpcConnection::from_websocket(stream, connection_label)
         };
-        Self::connect(connection, args.into()).await
+        Self::connect_with_session_policy(connection, args.into(), disconnect_session_policy).await
     }
 
     pub(crate) async fn connect_stdio_command(
@@ -122,10 +135,11 @@ impl ExecServerClient {
             });
         }
 
-        Self::connect(
+        Self::connect_with_session_policy(
             JsonRpcConnection::from_stdio(stdout, stdin, "exec-server stdio command".to_string())
                 .with_child_process(child),
             args.into(),
+            DisconnectSessionPolicy::Fail,
         )
         .await
     }

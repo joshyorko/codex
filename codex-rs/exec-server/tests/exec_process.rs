@@ -541,7 +541,7 @@ async fn assert_exec_process_preserves_queued_events_before_subscribe(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 // Serialize tests that launch a real exec-server process through the full CLI.
 #[serial_test::serial(remote_exec_server)]
-async fn remote_exec_process_reports_transport_disconnect() -> Result<()> {
+async fn remote_exec_process_in_flight_read_fails_when_transport_disconnects() -> Result<()> {
     let mut context = create_process_context(/*use_remote*/ true).await?;
     let session = context
         .backend
@@ -562,7 +562,6 @@ async fn remote_exec_process_reports_transport_disconnect() -> Result<()> {
         .await?;
 
     let process = Arc::clone(&session.process);
-    let mut events = process.subscribe_events();
     let process_for_pending_read = Arc::clone(&process);
     let pending_read = tokio::spawn(async move {
         process_for_pending_read
@@ -579,36 +578,14 @@ async fn remote_exec_process_reports_transport_disconnect() -> Result<()> {
         .expect("remote context should include exec-server harness");
     server.shutdown().await?;
 
-    let event = timeout(Duration::from_secs(2), events.recv()).await??;
-    let ExecProcessEvent::Failed(event_message) = event else {
-        anyhow::bail!("expected process failure event, got {event:?}");
-    };
+    let pending_error = timeout(Duration::from_secs(2), pending_read)
+        .await??
+        .expect_err("pending read should fail when transport disconnects");
     assert!(
-        event_message.starts_with("exec-server transport disconnected"),
-        "unexpected failure event: {event_message}"
-    );
-
-    let pending_response = timeout(Duration::from_secs(2), pending_read).await???;
-    let pending_message = pending_response
-        .failure
-        .expect("pending read should surface disconnect as a failure");
-    assert!(
-        pending_message.starts_with("exec-server transport disconnected"),
-        "unexpected pending failure message: {pending_message}"
-    );
-
-    let mut wake_rx = process.subscribe_wake();
-    let response = read_process_until_change(process, &mut wake_rx, /*after_seq*/ None).await?;
-    let message = response
-        .failure
-        .expect("disconnect should surface as a failure");
-    assert!(
-        message.starts_with("exec-server transport disconnected"),
-        "unexpected failure message: {message}"
-    );
-    assert!(
-        response.closed,
-        "disconnect should close the process session"
+        pending_error
+            .to_string()
+            .starts_with("exec-server transport disconnected"),
+        "unexpected pending read error: {pending_error}"
     );
 
     let write_result = timeout(
@@ -619,9 +596,7 @@ async fn remote_exec_process_reports_transport_disconnect() -> Result<()> {
     .context("timed out waiting for write after disconnect")?;
     let write_error = write_result.expect_err("write after disconnect should fail");
     assert!(
-        write_error
-            .to_string()
-            .starts_with("exec-server transport disconnected"),
+        write_error.to_string().contains("exec-server"),
         "unexpected write error: {write_error}"
     );
 
