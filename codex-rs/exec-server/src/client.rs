@@ -229,11 +229,9 @@ impl LazyRemoteExecServerClient {
             return Ok(client);
         }
 
-        let _connect_permit = self
-            .connect_lock
-            .acquire()
-            .await
-            .expect("connect semaphore should stay open");
+        let _connect_permit = self.connect_lock.acquire().await.map_err(|_| {
+            ExecServerError::Protocol("exec-server connect lock closed".to_string())
+        })?;
         if let Some(client) = self.connected_client() {
             return Ok(client);
         }
