@@ -11,9 +11,7 @@ use crate::ExecServerError;
 use crate::StartedExecProcess;
 use crate::client::LazyRemoteExecServerClient;
 use crate::client::Session;
-use crate::protocol::EXEC_METHOD;
 use crate::protocol::ExecParams;
-use crate::protocol::ExecResponse;
 use crate::protocol::ReadResponse;
 use crate::protocol::WriteResponse;
 
@@ -38,11 +36,7 @@ impl ExecBackend for RemoteProcess {
     async fn start(&self, params: ExecParams) -> Result<StartedExecProcess, ExecServerError> {
         let process_id = params.process_id.clone();
         let session = self.client.register_session(&process_id).await?;
-        if let Err(err) = self
-            .client
-            .call::<_, ExecResponse>(EXEC_METHOD, &params)
-            .await
-        {
+        if let Err(err) = session.client().await?.exec(params).await {
             session.unregister().await;
             return Err(err);
         }
