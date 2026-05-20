@@ -265,14 +265,6 @@ impl LazyRemoteExecServerClient {
         .await
     }
 
-    pub(crate) async fn call<T, F, Fut>(&self, call: F) -> Result<T, ExecServerError>
-    where
-        F: FnOnce(ExecServerClient) -> Fut,
-        Fut: Future<Output = Result<T, ExecServerError>>,
-    {
-        call(self.get().await?).await
-    }
-
     fn connected_client(&self) -> Option<ExecServerClient> {
         self.client
             .lock()
@@ -288,11 +280,7 @@ impl HttpClient for LazyRemoteExecServerClient {
         &self,
         params: crate::HttpRequestParams,
     ) -> BoxFuture<'_, Result<crate::HttpRequestResponse, ExecServerError>> {
-        async move {
-            self.call(|client| async move { client.http_request(params).await })
-                .await
-        }
-        .boxed()
+        async move { self.get().await?.http_request(params).await }.boxed()
     }
 
     fn http_request_stream(
@@ -302,11 +290,7 @@ impl HttpClient for LazyRemoteExecServerClient {
         '_,
         Result<(crate::HttpRequestResponse, crate::HttpResponseBodyStream), ExecServerError>,
     > {
-        async move {
-            self.call(|client| async move { client.http_request_stream(params).await })
-                .await
-        }
-        .boxed()
+        async move { self.get().await?.http_request_stream(params).await }.boxed()
     }
 }
 
