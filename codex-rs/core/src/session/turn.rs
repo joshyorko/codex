@@ -114,6 +114,13 @@ use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
 
+const MAX_AUTO_COMPACTIONS_PER_TURN: usize = 3;
+
+pub(crate) enum RunTurnResult {
+    Continue(Option<String>),
+    Terminal,
+}
+
 /// Takes a user message as input and runs a loop where, at each sampling request, the model
 /// replies with either:
 ///
@@ -132,33 +139,44 @@ pub(crate) async fn run_turn(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     turn_extension_data: Arc<codex_extension_api::ExtensionData>,
+    auto_compact_limiter: &mut AutoCompactTurnLimiter,
     input: Vec<UserInput>,
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
-) -> Option<String> {
+) -> RunTurnResult {
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
     // when they would push the thread over the compaction threshold.
-    let pre_sampling_compact =
-        match run_pre_sampling_compact(&sess, &turn_context, &mut client_session).await {
-            Ok(pre_sampling_compact) => pre_sampling_compact,
-            Err(err) => {
-                if err.to_codex_protocol_error() == CodexErrorInfo::UsageLimitExceeded
-                    && let Err(err) = sess
-                        .goal_runtime_apply(GoalRuntimeEvent::UsageLimitReached {
-                            turn_context: turn_context.as_ref(),
-                        })
-                        .await
-                {
-                    warn!("failed to usage-limit active goal after usage-limit error: {err}");
-                }
-                error!("Failed to run pre-sampling compact");
-                return None;
+    let pre_sampling_compact = match run_pre_sampling_compact(
+        &sess,
+        &turn_context,
+        &mut client_session,
+        auto_compact_limiter,
+    )
+    .await
+    {
+        Ok(pre_sampling_compact) => pre_sampling_compact,
+        Err(err) => {
+            if err.to_codex_protocol_error() == CodexErrorInfo::UsageLimitExceeded
+                && let Err(err) = sess
+                    .goal_runtime_apply(GoalRuntimeEvent::UsageLimitReached {
+                        turn_context: turn_context.as_ref(),
+                    })
+                    .await
+            {
+                warn!("failed to usage-limit active goal after usage-limit error: {err}");
             }
-        };
+            error!("Failed to run pre-sampling compact");
+            return if err.to_codex_protocol_error() == CodexErrorInfo::ContextWindowExceeded {
+                RunTurnResult::Terminal
+            } else {
+                RunTurnResult::Continue(None)
+            };
+        }
+    };
     if pre_sampling_compact.reset_client_session {
         client_session.reset_websocket_session();
     }
@@ -166,11 +184,14 @@ pub(crate) async fn run_turn(
     sess.record_context_updates_and_set_reference_context_item(turn_context.as_ref())
         .await;
 
-    let (injection_items, explicitly_enabled_connectors) =
-        build_skills_and_plugins(&sess, turn_context.as_ref(), &input, &cancellation_token).await?;
+    let Some((injection_items, explicitly_enabled_connectors)) =
+        build_skills_and_plugins(&sess, turn_context.as_ref(), &input, &cancellation_token).await
+    else {
+        return RunTurnResult::Continue(None);
+    };
 
     if run_pending_session_start_hooks(&sess, &turn_context).await {
-        return None;
+        return RunTurnResult::Continue(None);
     }
     if !input.is_empty() {
         let initial_turn_input = TurnInput::UserInput(input.clone());
@@ -183,7 +204,7 @@ pub(crate) async fn run_turn(
                 user_prompt_submit_outcome.additional_contexts,
             )
             .await;
-            return None;
+            return RunTurnResult::Continue(None);
         }
         record_pending_input(
             &sess,
@@ -237,37 +258,14 @@ pub(crate) async fn run_turn(
     let mut can_drain_pending_input = input.is_empty();
 
     loop {
-        // Note that pending_input would be something like a message the user
-        // submitted through the UI while the model was running. Though the UI
-        // may support this, the model might not.
-        let pending_input = if can_drain_pending_input {
-            sess.input_queue.get_pending_input(&sess.active_turn).await
-        } else {
-            Vec::new()
-        };
-
-        let mut blocked_pending_input = false;
-        let mut accepted_pending_input = false;
-        for pending_input_item in pending_input {
-            let hook_outcome =
-                inspect_pending_input(&sess, &turn_context, &pending_input_item).await;
-            if hook_outcome.should_stop {
-                blocked_pending_input = true;
-                record_additional_contexts(&sess, &turn_context, hook_outcome.additional_contexts)
-                    .await;
-            } else {
-                accepted_pending_input = true;
-                record_pending_input(
-                    &sess,
-                    &turn_context,
-                    pending_input_item,
-                    hook_outcome.additional_contexts,
-                )
-                .await;
+        if can_drain_pending_input {
+            let pending_input =
+                drain_pending_input(&sess, &turn_context, auto_compact_limiter).await;
+            let blocked_without_acceptance = pending_input.blocked_without_acceptance;
+            pending_input.record_accepted(&sess, &turn_context).await;
+            if blocked_without_acceptance {
+                break;
             }
-        }
-        if blocked_pending_input && !accepted_pending_input {
-            break;
         }
 
         // Construct the input that we will send to the model.
@@ -323,12 +321,71 @@ pub(crate) async fn run_turn(
                     "post sampling token usage"
                 );
 
+                if token_limit_reached
+                    && !model_needs_follow_up
+                    && has_pending_input
+                    && auto_compact_limiter.is_exhausted()
+                {
+                    // Give real queued user steering a chance to reset the exhausted limiter, but
+                    // keep the accepted input out of the compaction request. It is recorded after a
+                    // successful compaction so the steer stays after the compaction summary.
+                    let pending_input =
+                        drain_pending_input(&sess, &turn_context, auto_compact_limiter).await;
+                    if pending_input.blocked_without_acceptance {
+                        break;
+                    }
+                    let accepted_user_input = pending_input.accepted_user_input;
+                    let reset_client_session = match run_auto_compact(
+                        &sess,
+                        &turn_context,
+                        &mut client_session,
+                        auto_compact_limiter,
+                        InitialContextInjection::BeforeLastUserMessage,
+                        CompactionReason::ContextLimit,
+                        CompactionPhase::MidTurn,
+                    )
+                    .await
+                    {
+                        Ok(reset_client_session) => reset_client_session,
+                        Err(err) => {
+                            let context_window_exceeded = err.to_codex_protocol_error()
+                                == CodexErrorInfo::ContextWindowExceeded;
+                            if accepted_user_input || !context_window_exceeded {
+                                pending_input.record_accepted(&sess, &turn_context).await;
+                            }
+                            if err.to_codex_protocol_error() == CodexErrorInfo::UsageLimitExceeded
+                                && let Err(err) = sess
+                                    .goal_runtime_apply(GoalRuntimeEvent::UsageLimitReached {
+                                        turn_context: turn_context.as_ref(),
+                                    })
+                                    .await
+                            {
+                                warn!(
+                                    "failed to usage-limit active goal after usage-limit error: {err}"
+                                );
+                            }
+                            return if context_window_exceeded {
+                                RunTurnResult::Terminal
+                            } else {
+                                RunTurnResult::Continue(None)
+                            };
+                        }
+                    };
+                    if reset_client_session {
+                        client_session.reset_websocket_session();
+                    }
+                    pending_input.record_accepted(&sess, &turn_context).await;
+                    can_drain_pending_input = true;
+                    continue;
+                }
+
                 // as long as compaction works well in getting us way below the token limit, we shouldn't worry about being in an infinite loop.
                 if token_limit_reached && needs_follow_up {
                     let reset_client_session = match run_auto_compact(
                         &sess,
                         &turn_context,
                         &mut client_session,
+                        auto_compact_limiter,
                         InitialContextInjection::BeforeLastUserMessage,
                         CompactionReason::ContextLimit,
                         CompactionPhase::MidTurn,
@@ -348,7 +405,13 @@ pub(crate) async fn run_turn(
                                     "failed to usage-limit active goal after usage-limit error: {err}"
                                 );
                             }
-                            return None;
+                            return if err.to_codex_protocol_error()
+                                == CodexErrorInfo::ContextWindowExceeded
+                            {
+                                RunTurnResult::Terminal
+                            } else {
+                                RunTurnResult::Continue(None)
+                            };
                         }
                     };
                     if reset_client_session {
@@ -399,7 +462,7 @@ pub(crate) async fn run_turn(
                     )
                     .await
                     {
-                        return None;
+                        return RunTurnResult::Continue(None);
                     }
                     break;
                 }
@@ -447,7 +510,66 @@ pub(crate) async fn run_turn(
         }
     }
 
-    last_agent_message
+    RunTurnResult::Continue(last_agent_message)
+}
+
+struct AcceptedPendingInput {
+    input: TurnInput,
+    additional_contexts: Vec<String>,
+}
+
+#[derive(Default)]
+struct PendingInputDrain {
+    accepted: Vec<AcceptedPendingInput>,
+    accepted_user_input: bool,
+    blocked_without_acceptance: bool,
+}
+
+impl PendingInputDrain {
+    async fn record_accepted(self, sess: &Arc<Session>, turn_context: &Arc<TurnContext>) {
+        for accepted in self.accepted {
+            record_pending_input(
+                sess,
+                turn_context,
+                accepted.input,
+                accepted.additional_contexts,
+            )
+            .await;
+        }
+    }
+}
+
+async fn drain_pending_input(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    auto_compact_limiter: &mut AutoCompactTurnLimiter,
+) -> PendingInputDrain {
+    // Note that pending input would be something like a message the user submitted through the UI
+    // while the model was running. Though the UI may support this, the model might not.
+    let pending_input = sess.input_queue.get_pending_input(&sess.active_turn).await;
+
+    let mut blocked_pending_input = false;
+    let mut drain = PendingInputDrain::default();
+    for pending_input_item in pending_input {
+        let is_user_input = matches!(&pending_input_item, TurnInput::UserInput(_));
+        let hook_outcome = inspect_pending_input(sess, turn_context, &pending_input_item).await;
+        if hook_outcome.should_stop {
+            blocked_pending_input = true;
+            record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
+        } else {
+            if is_user_input {
+                auto_compact_limiter.reset_after_user_input();
+                drain.accepted_user_input = true;
+            }
+            drain.accepted.push(AcceptedPendingInput {
+                input: pending_input_item,
+                additional_contexts: hook_outcome.additional_contexts,
+            });
+        }
+    }
+
+    drain.blocked_without_acceptance = blocked_pending_input && drain.accepted.is_empty();
+    drain
 }
 
 #[expect(
@@ -652,6 +774,60 @@ struct AutoCompactTokenStatus {
     token_limit_reached: bool,
 }
 
+#[derive(Default)]
+pub(crate) struct AutoCompactTurnLimiter {
+    attempts: usize,
+}
+
+impl AutoCompactTurnLimiter {
+    fn reset_after_user_input(&mut self) {
+        self.attempts = 0;
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.attempts >= MAX_AUTO_COMPACTIONS_PER_TURN
+    }
+
+    async fn acquire(
+        &mut self,
+        sess: &Session,
+        turn_context: &TurnContext,
+        reason: CompactionReason,
+        phase: CompactionPhase,
+    ) -> CodexResult<()> {
+        if self.is_exhausted() {
+            let token_status = auto_compact_token_status(sess, turn_context).await;
+            warn!(
+                turn_id = %turn_context.sub_id,
+                auto_compactions_attempted = self.attempts,
+                auto_compaction_limit = MAX_AUTO_COMPACTIONS_PER_TURN,
+                reason = ?reason,
+                phase = ?phase,
+                active_context_tokens = token_status.active_context_tokens,
+                auto_compact_scope_tokens = token_status.auto_compact_scope_tokens,
+                auto_compact_scope_limit = token_status.auto_compact_scope_limit,
+                full_context_window_limit = ?token_status.full_context_window_limit,
+                full_context_window_limit_reached = token_status.full_context_window_limit_reached,
+                "automatic compaction limit reached; stopping turn"
+            );
+            sess.send_event(
+                turn_context,
+                EventMsg::Error(ErrorEvent {
+                    message: format!(
+                        "Codex stopped after {MAX_AUTO_COMPACTIONS_PER_TURN} automatic compactions in this turn because the context remained too large. Start a new thread or reduce earlier history before retrying."
+                    ),
+                    codex_error_info: Some(CodexErrorInfo::ContextWindowExceeded),
+                }),
+            )
+            .await;
+            return Err(CodexErr::ContextWindowExceeded);
+        }
+
+        self.attempts += 1;
+        Ok(())
+    }
+}
+
 async fn auto_compact_token_status(
     sess: &Session,
     turn_context: &TurnContext,
@@ -708,9 +884,15 @@ async fn run_pre_sampling_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
+    auto_compact_limiter: &mut AutoCompactTurnLimiter,
 ) -> CodexResult<PreSamplingCompactResult> {
-    let mut pre_sampling_compacted =
-        maybe_run_previous_model_inline_compact(sess, turn_context, client_session).await?;
+    let mut pre_sampling_compacted = maybe_run_previous_model_inline_compact(
+        sess,
+        turn_context,
+        client_session,
+        auto_compact_limiter,
+    )
+    .await?;
     let mut reset_client_session = pre_sampling_compacted;
     let token_status = auto_compact_token_status(sess.as_ref(), turn_context.as_ref()).await;
     // Compact if the configured auto-compaction budget or usable context window is exhausted.
@@ -719,6 +901,7 @@ async fn run_pre_sampling_compact(
             sess,
             turn_context,
             client_session,
+            auto_compact_limiter,
             InitialContextInjection::DoNotInject,
             CompactionReason::ContextLimit,
             CompactionPhase::PreTurn,
@@ -741,6 +924,7 @@ async fn maybe_run_previous_model_inline_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
+    auto_compact_limiter: &mut AutoCompactTurnLimiter,
 ) -> CodexResult<bool> {
     let Some(previous_turn_settings) = sess.previous_turn_settings().await else {
         return Ok(false);
@@ -780,6 +964,7 @@ async fn maybe_run_previous_model_inline_compact(
             sess,
             &previous_model_turn_context,
             client_session,
+            auto_compact_limiter,
             InitialContextInjection::DoNotInject,
             CompactionReason::ModelDownshift,
             CompactionPhase::PreTurn,
@@ -794,10 +979,15 @@ async fn run_auto_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
+    auto_compact_limiter: &mut AutoCompactTurnLimiter,
     initial_context_injection: InitialContextInjection,
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<bool> {
+    auto_compact_limiter
+        .acquire(sess.as_ref(), turn_context.as_ref(), reason, phase)
+        .await?;
+
     if should_use_remote_compact_task(turn_context.provider.info()) {
         if turn_context.features.enabled(Feature::RemoteCompactionV2) {
             run_inline_remote_auto_compact_task_v2(

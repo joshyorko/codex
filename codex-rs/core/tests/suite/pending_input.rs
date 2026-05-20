@@ -680,6 +680,241 @@ async fn steered_user_input_follows_compact_when_only_the_steer_needs_follow_up(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steered_user_input_resets_auto_compact_limit() {
+    let (gate_first_completed_tx, gate_first_completed_rx) = oneshot::channel();
+    let (gate_second_completed_tx, gate_second_completed_rx) = oneshot::channel();
+    let (gate_third_completed_tx, gate_third_completed_rx) = oneshot::channel();
+    let (gate_fourth_completed_tx, gate_fourth_completed_rx) = oneshot::channel();
+
+    let sampling_chunks = |idx: usize, text: &'static str, gate| {
+        vec![
+            chunk(ev_response_created(&format!("resp-{idx}"))),
+            chunk(ev_message_item_added(&format!("msg-{idx}"), "")),
+            chunk(ev_output_text_delta(text)),
+            chunk(json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": format!("msg-{idx}"),
+                    "content": [{"type": "output_text", "text": text}],
+                    "phase": "commentary",
+                }
+            })),
+            gated_chunk(
+                gate,
+                vec![ev_completed_with_tokens(
+                    &format!("resp-{idx}"),
+                    /*total_tokens*/ 500,
+                )],
+            ),
+        ]
+    };
+    let compact_chunks = |idx: usize| {
+        vec![
+            chunk(ev_response_created(&format!("resp-compact-{idx}"))),
+            chunk(ev_message_item_done(
+                &format!("msg-compact-{idx}"),
+                &format!("AUTO_COMPACT_SUMMARY_{idx}"),
+            )),
+            chunk(ev_completed_with_tokens(
+                &format!("resp-compact-{idx}"),
+                /*total_tokens*/ 50,
+            )),
+        ]
+    };
+    let final_chunks = vec![
+        chunk(ev_response_created("resp-final")),
+        chunk(ev_message_item_done("msg-final", "processed fifth prompt")),
+        chunk(ev_completed_with_tokens(
+            "resp-final",
+            /*total_tokens*/ 70,
+        )),
+    ];
+
+    let (server, _completions) = start_streaming_sse_server(vec![
+        sampling_chunks(1, "first answer", gate_first_completed_rx),
+        compact_chunks(1),
+        sampling_chunks(2, "processed second prompt", gate_second_completed_rx),
+        compact_chunks(2),
+        sampling_chunks(3, "processed third prompt", gate_third_completed_rx),
+        compact_chunks(3),
+        sampling_chunks(4, "processed fourth prompt", gate_fourth_completed_rx),
+        compact_chunks(4),
+        final_chunks,
+    ])
+    .await;
+
+    let codex = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(|config| {
+            config.model_provider.name = "OpenAI (test)".to_string();
+            config.model_provider.supports_websockets = false;
+            config.model_auto_compact_token_limit = Some(200);
+        })
+        .build_with_streaming_server(&server)
+        .await
+        .unwrap_or_else(|err| panic!("build streaming Codex test session: {err}"))
+        .codex;
+
+    submit_user_input(&codex, "first prompt").await;
+
+    wait_for_agent_message(&codex, "first answer").await;
+    steer_user_input(&codex, "second prompt").await;
+    let _ = gate_first_completed_tx.send(());
+
+    wait_for_agent_message(&codex, "processed second prompt").await;
+    steer_user_input(&codex, "third prompt").await;
+    let _ = gate_second_completed_tx.send(());
+
+    wait_for_agent_message(&codex, "processed third prompt").await;
+    steer_user_input(&codex, "fourth prompt").await;
+    let _ = gate_third_completed_tx.send(());
+
+    wait_for_agent_message(&codex, "processed fourth prompt").await;
+    steer_user_input(&codex, "fifth prompt").await;
+    let _ = gate_fourth_completed_tx.send(());
+
+    wait_for_agent_message(&codex, "processed fifth prompt").await;
+    wait_for_turn_complete(&codex).await;
+
+    let requests = server.requests().await;
+    assert_eq!(
+        requests.len(),
+        9,
+        "four auto compactions should be allowed when separated by accepted steered input"
+    );
+
+    let final_body: Value =
+        from_slice(&requests[8]).unwrap_or_else(|err| panic!("parse final request: {err}"));
+    let final_user_texts = message_input_texts(&final_body, "user");
+    assert!(
+        final_user_texts.iter().any(|text| text == "fifth prompt"),
+        "steered input after the fourth compaction should be processed"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steered_user_input_resets_exhausted_auto_compact_limit() {
+    let (gate_fourth_completed_tx, gate_fourth_completed_rx) = oneshot::channel();
+
+    let tool_sampling_chunks = |idx: usize| {
+        let args = json!({
+            "command": format!("echo step-{idx}"),
+            "login": false,
+            "timeout_ms": 2000,
+        })
+        .to_string();
+        vec![
+            chunk(ev_response_created(&format!("resp-{idx}"))),
+            chunk(ev_function_call(
+                &format!("call-{idx}"),
+                "shell_command",
+                &args,
+            )),
+            chunk(ev_completed_with_tokens(
+                &format!("resp-{idx}"),
+                /*total_tokens*/ 500,
+            )),
+        ]
+    };
+    let compact_chunks = |idx: usize| {
+        vec![
+            chunk(ev_response_created(&format!("resp-compact-{idx}"))),
+            chunk(ev_message_item_done(
+                &format!("msg-compact-{idx}"),
+                &format!("AUTO_COMPACT_SUMMARY_{idx}"),
+            )),
+            chunk(ev_completed_with_tokens(
+                &format!("resp-compact-{idx}"),
+                /*total_tokens*/ 50,
+            )),
+        ]
+    };
+    let fourth_sampling_chunks = vec![
+        chunk(ev_response_created("resp-4")),
+        chunk(ev_message_item_added("msg-4", "")),
+        chunk(ev_output_text_delta("ready for late steer")),
+        chunk(ev_message_item_done("msg-4", "ready for late steer")),
+        gated_chunk(
+            gate_fourth_completed_rx,
+            vec![ev_completed_with_tokens(
+                "resp-4", /*total_tokens*/ 500,
+            )],
+        ),
+    ];
+    let final_chunks = vec![
+        chunk(ev_response_created("resp-final")),
+        chunk(ev_message_item_done("msg-final", "processed late steer")),
+        chunk(ev_completed_with_tokens(
+            "resp-final",
+            /*total_tokens*/ 70,
+        )),
+    ];
+
+    let (server, _completions) = start_streaming_sse_server(vec![
+        tool_sampling_chunks(1),
+        compact_chunks(1),
+        tool_sampling_chunks(2),
+        compact_chunks(2),
+        tool_sampling_chunks(3),
+        compact_chunks(3),
+        fourth_sampling_chunks,
+        compact_chunks(4),
+        final_chunks,
+    ])
+    .await;
+
+    let test = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(|config| {
+            config.model_provider.name = "OpenAI (test)".to_string();
+            config.model_provider.supports_websockets = false;
+            config.model_auto_compact_token_limit = Some(200);
+        })
+        .build_with_streaming_server(&server)
+        .await
+        .unwrap_or_else(|err| panic!("build streaming Codex test session: {err}"));
+    let codex = test.codex.clone();
+
+    submit_danger_full_access_user_turn(&test, "first prompt").await;
+    wait_for_agent_message(&codex, "ready for late steer").await;
+    steer_user_input(&codex, "late steer").await;
+    let _ = gate_fourth_completed_tx.send(());
+
+    wait_for_agent_message(&codex, "processed late steer").await;
+    wait_for_turn_complete(&codex).await;
+
+    let requests = server.requests().await;
+    assert_eq!(
+        requests.len(),
+        9,
+        "the fourth compaction should run after accepted user steering resets the exhausted limiter"
+    );
+
+    let compact_body: Value =
+        from_slice(&requests[7]).unwrap_or_else(|err| panic!("parse compact request: {err}"));
+    let final_body: Value =
+        from_slice(&requests[8]).unwrap_or_else(|err| panic!("parse final request: {err}"));
+
+    let compact_user_texts = message_input_texts(&compact_body, "user");
+    assert!(
+        !compact_user_texts.iter().any(|text| text == "late steer"),
+        "late steer should remain pending until after the compaction that it unblocked"
+    );
+
+    let final_user_texts = message_input_texts(&final_body, "user");
+    assert!(
+        final_user_texts.iter().any(|text| text == "late steer"),
+        "late steer should be recorded after compaction and sent to the model"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steered_user_input_waits_when_tool_output_triggers_compact_before_next_request() {
     let (gate_first_completed_tx, gate_first_completed_rx) = oneshot::channel();
 
