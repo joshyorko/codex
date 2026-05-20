@@ -308,22 +308,14 @@ impl RemoteExecServerClient {
 
     async fn call<P, T>(&self, method: &str, params: P) -> Result<T, ExecServerError>
     where
-        P: serde::Serialize + Clone,
+        P: serde::Serialize,
         T: serde::de::DeserializeOwned,
     {
-        let client = self.get().await?;
-        match client.call(method, &params).await {
-            Ok(response) => Ok(response),
-            Err(err) if is_transport_closed_error(&err) => {
-                client.mark_disconnected(&err);
-                debug!(
-                    method,
-                    "retrying exec-server call after websocket disconnect"
-                );
-                self.get().await?.call(method, &params).await
-            }
-            Err(err) => Err(err),
-        }
+        // `get()` reconnects before dispatch when the prior websocket is
+        // already known dead. Once a request is sent, do not replay it after a
+        // lost response because mutating fs/http calls may already have taken
+        // effect on the exec-server.
+        self.get().await?.call(method, &params).await
     }
 
     pub(crate) async fn fs_read_file(
@@ -428,19 +420,7 @@ impl HttpClient for RemoteExecServerClient {
         params: HttpRequestParams,
     ) -> BoxFuture<'_, Result<(HttpRequestResponse, crate::HttpResponseBodyStream), ExecServerError>>
     {
-        async move {
-            let client = self.get().await?;
-            match client.http_request_stream(params.clone()).await {
-                Ok(response) => Ok(response),
-                Err(err) if is_transport_closed_error(&err) => {
-                    client.mark_disconnected(&err);
-                    debug!("retrying streamed exec-server HTTP request after websocket disconnect");
-                    self.get().await?.http_request_stream(params).await
-                }
-                Err(err) => Err(err),
-            }
-        }
-        .boxed()
+        async move { self.get().await?.http_request_stream(params).await }.boxed()
     }
 }
 
@@ -635,10 +615,6 @@ impl ExecServerClient {
 
     fn is_disconnected(&self) -> bool {
         self.inner.disconnected.get().is_some()
-    }
-
-    fn mark_disconnected(&self, error: &ExecServerError) {
-        let _ = self.inner.set_disconnected(error.to_string());
     }
 
     pub(crate) async fn connect(

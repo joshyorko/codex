@@ -53,6 +53,7 @@ use image::load_from_memory;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use serial_test::serial;
 use std::fs;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -560,6 +561,7 @@ async fn view_image_tool_applies_local_sandbox_read_denies() -> anyhow::Result<(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(remote_test_env)]
 async fn view_image_routes_to_selected_remote_environment() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     let Some(_remote_env) = get_remote_test_env() else {

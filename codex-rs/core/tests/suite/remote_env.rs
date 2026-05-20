@@ -138,6 +138,7 @@ async fn wait_for_completion_without_patch_approval(test: &TestCodex) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(remote_test_env)]
 async fn remote_test_env_can_connect_and_use_filesystem() -> Result<()> {
     let Some(_remote_env) = get_remote_test_env() else {
         return Ok(());
@@ -172,7 +173,7 @@ async fn remote_test_env_can_connect_and_use_filesystem() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
+#[serial(remote_test_env)]
 async fn remote_test_env_reconnects_after_exec_server_websocket_disconnect() -> Result<()> {
     let Some(_remote_env) = get_remote_test_env() else {
         return Ok(());
@@ -306,6 +307,7 @@ async fn exec_command_routing_output(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(remote_test_env)]
 async fn exec_command_routes_to_selected_remote_environment() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let Some(_remote_env) = get_remote_test_env() else {
@@ -382,6 +384,7 @@ async fn exec_command_routes_to_selected_remote_environment() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(remote_test_env)]
 async fn apply_patch_freeform_routes_to_selected_remote_environment() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let Some(_remote_env) = get_remote_test_env() else {
@@ -467,6 +470,7 @@ async fn apply_patch_freeform_routes_to_selected_remote_environment() -> Result<
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(remote_test_env)]
 async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let Some(_remote_env) = get_remote_test_env() else {
@@ -653,6 +657,7 @@ async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(remote_test_env)]
 async fn apply_patch_intercepted_exec_command_routes_to_selected_remote_environment() -> Result<()>
 {
     skip_if_no_network!(Ok(()));
@@ -748,6 +753,7 @@ async fn apply_patch_intercepted_exec_command_routes_to_selected_remote_environm
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(remote_test_env)]
 async fn remote_test_env_sandboxed_read_allows_readable_root() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let Some(_remote_env) = get_remote_test_env() else {
@@ -795,6 +801,7 @@ async fn remote_test_env_sandboxed_read_allows_readable_root() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(remote_test_env)]
 async fn remote_test_env_sandboxed_read_rejects_symlink_parent_dotdot_escape() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let Some(_remote_env) = get_remote_test_env() else {
@@ -829,6 +836,7 @@ async fn remote_test_env_sandboxed_read_rejects_symlink_parent_dotdot_escape() -
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(remote_test_env)]
 async fn remote_test_env_remove_removes_symlink_not_target() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let Some(_remote_env) = get_remote_test_env() else {
@@ -896,6 +904,7 @@ async fn remote_test_env_remove_removes_symlink_not_target() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(remote_test_env)]
 async fn remote_test_env_copy_preserves_symlink_source() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let Some(_remote_env) = get_remote_test_env() else {
