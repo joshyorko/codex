@@ -11,6 +11,7 @@ pub(crate) struct TurnRequestProcessor {
     config_manager: ConfigManager,
     pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
     thread_state_manager: ThreadStateManager,
+    state_db: Option<StateDbHandle>,
     thread_watch_manager: ThreadWatchManager,
     thread_list_state_permit: Arc<Semaphore>,
     skills_watcher: Arc<SkillsWatcher>,
@@ -42,6 +43,7 @@ impl TurnRequestProcessor {
         config_manager: ConfigManager,
         pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
         thread_state_manager: ThreadStateManager,
+        state_db: Option<StateDbHandle>,
         thread_watch_manager: ThreadWatchManager,
         thread_list_state_permit: Arc<Semaphore>,
         skills_watcher: Arc<SkillsWatcher>,
@@ -56,6 +58,7 @@ impl TurnRequestProcessor {
             config_manager,
             pending_thread_unloads,
             thread_state_manager,
+            state_db,
             thread_watch_manager,
             thread_list_state_permit,
             skills_watcher,
@@ -77,6 +80,16 @@ impl TurnRequestProcessor {
         )
         .await
         .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn queued_turn_start(
+        &self,
+        params: TurnStartParams,
+    ) -> Result<TurnStartResponse, JSONRPCErrorError> {
+        Self::validate_v2_input_limit(&params.input)?;
+        let (thread_id, thread) = self.load_thread(&params.thread_id).await?;
+        self.start_turn_from_params(thread_id, thread, params, /*trace_context*/ None)
+            .await
     }
 
     pub(crate) async fn thread_inject_items(
@@ -356,7 +369,48 @@ impl TurnRequestProcessor {
         .inspect_err(|error| {
             self.track_error_response(&request_id, error, /*error_type*/ None);
         })?;
+        let response = self
+            .start_turn_from_params(
+                thread_id,
+                thread,
+                params,
+                self.request_trace_context(&request_id).await,
+            )
+            .await?;
+        let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+        {
+            let mut thread_state = thread_state.lock().await;
+            let turn_lifecycle_already_visible = thread_state
+                .active_turn_snapshot()
+                .is_some_and(|turn| turn.id == response.turn.id)
+                || thread_state.last_terminal_turn_id.as_deref() == Some(response.turn.id.as_str());
+            if !turn_lifecycle_already_visible {
+                match &mut thread_state.pending_turn_starts {
+                    crate::thread_state::PendingTurnStarts::None => {
+                        thread_state.pending_turn_starts =
+                            crate::thread_state::PendingTurnStarts::WaitingForLifecycle {
+                                turn_ids: HashSet::from([response.turn.id.clone()]),
+                            };
+                    }
+                    crate::thread_state::PendingTurnStarts::WaitingForLifecycle { turn_ids } => {
+                        turn_ids.insert(response.turn.id.clone());
+                    }
+                }
+            }
+        }
+        self.outgoing
+            .record_request_turn_id(&request_id, &response.turn.id)
+            .await;
+        Ok(response)
+    }
 
+    async fn start_turn_from_params(
+        &self,
+        thread_id: ThreadId,
+        thread: Arc<CodexThread>,
+        params: TurnStartParams,
+        trace_context: Option<W3cTraceContext>,
+    ) -> Result<TurnStartResponse, JSONRPCErrorError> {
         let collaboration_mode = params
             .collaboration_mode
             .map(|mode| self.normalize_turn_start_collaboration_mode(mode));
@@ -528,14 +582,10 @@ impl TurnRequestProcessor {
             responsesapi_client_metadata: params.responsesapi_client_metadata,
             thread_settings,
         };
-        let turn_id = self
-            .submit_core_op(&request_id, thread.as_ref(), turn_op)
+        let turn_id = thread
+            .submit_with_trace(turn_op, trace_context)
             .await
-            .map_err(|err| {
-                let error = internal_error(format!("failed to start turn: {err}"));
-                self.track_error_response(&request_id, &error, /*error_type*/ None);
-                error
-            })?;
+            .map_err(|err| internal_error(format!("failed to start turn: {err}")))?;
 
         if turn_has_input {
             let config_snapshot = thread.config_snapshot().await;
@@ -549,9 +599,6 @@ impl TurnRequestProcessor {
             );
         }
 
-        self.outgoing
-            .record_request_turn_id(&request_id, &turn_id)
-            .await;
         let turn = Turn {
             id: turn_id,
             items: vec![],
@@ -1141,6 +1188,13 @@ impl TurnRequestProcessor {
             fallback_model_provider: self.config.model_provider_id.clone(),
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
+            thread_queue_processor: ThreadQueueRequestProcessor::new(
+                Arc::clone(&self.thread_manager),
+                Arc::clone(&self.outgoing),
+                self.state_db.clone(),
+                self.thread_state_manager.clone(),
+                self.clone(),
+            ),
         }
     }
 
