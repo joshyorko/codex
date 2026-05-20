@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
@@ -65,7 +64,10 @@ use crate::protocol::FsRemoveResponse;
 use crate::protocol::FsWriteFileParams;
 use crate::protocol::FsWriteFileResponse;
 use crate::protocol::HTTP_REQUEST_BODY_DELTA_METHOD;
+use crate::protocol::HTTP_REQUEST_METHOD;
 use crate::protocol::HttpRequestBodyDeltaNotification;
+use crate::protocol::HttpRequestParams;
+use crate::protocol::HttpRequestResponse;
 use crate::protocol::INITIALIZE_METHOD;
 use crate::protocol::INITIALIZED_METHOD;
 use crate::protocol::InitializeParams;
@@ -304,35 +306,24 @@ impl RemoteExecServerClient {
         }
     }
 
-    pub(crate) async fn request<T, F, Fut>(&self, mut request: F) -> Result<T, ExecServerError>
-    where
-        F: FnMut(ExecServerClient) -> Fut,
-        Fut: Future<Output = Result<T, ExecServerError>>,
-    {
-        let client = self.get().await?;
-        match request(client.clone()).await {
-            Ok(response) => Ok(response),
-            Err(err) if is_transport_closed_error(&err) => {
-                client.mark_disconnected(&err);
-                debug!("retrying exec-server request after websocket disconnect");
-                let client = self.get().await?;
-                request(client).await
-            }
-            Err(err) => Err(err),
-        }
-    }
-
     async fn call<P, T>(&self, method: &str, params: P) -> Result<T, ExecServerError>
     where
         P: serde::Serialize + Clone,
         T: serde::de::DeserializeOwned,
     {
-        self.request(|client| {
-            let method = method.to_string();
-            let params = params.clone();
-            async move { client.call(&method, &params).await }
-        })
-        .await
+        let client = self.get().await?;
+        match client.call(method, &params).await {
+            Ok(response) => Ok(response),
+            Err(err) if is_transport_closed_error(&err) => {
+                client.mark_disconnected(&err);
+                debug!(
+                    method,
+                    "retrying exec-server call after websocket disconnect"
+                );
+                self.get().await?.call(method, &params).await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub(crate) async fn fs_read_file(
@@ -422,31 +413,32 @@ impl RemoteExecServerClient {
 impl HttpClient for RemoteExecServerClient {
     fn http_request(
         &self,
-        params: crate::HttpRequestParams,
-    ) -> BoxFuture<'_, Result<crate::HttpRequestResponse, ExecServerError>> {
+        mut params: HttpRequestParams,
+    ) -> BoxFuture<'_, Result<HttpRequestResponse, ExecServerError>> {
         async move {
-            self.request(|client| {
-                let params = params.clone();
-                async move { client.http_request(params).await }
-            })
-            .await
+            params.stream_response = false;
+            self.call::<_, HttpRequestResponse>(HTTP_REQUEST_METHOD, params)
+                .await
         }
         .boxed()
     }
 
     fn http_request_stream(
         &self,
-        params: crate::HttpRequestParams,
-    ) -> BoxFuture<
-        '_,
-        Result<(crate::HttpRequestResponse, crate::HttpResponseBodyStream), ExecServerError>,
-    > {
+        params: HttpRequestParams,
+    ) -> BoxFuture<'_, Result<(HttpRequestResponse, crate::HttpResponseBodyStream), ExecServerError>>
+    {
         async move {
-            self.request(|client| {
-                let params = params.clone();
-                async move { client.http_request_stream(params).await }
-            })
-            .await
+            let client = self.get().await?;
+            match client.http_request_stream(params.clone()).await {
+                Ok(response) => Ok(response),
+                Err(err) if is_transport_closed_error(&err) => {
+                    client.mark_disconnected(&err);
+                    debug!("retrying streamed exec-server HTTP request after websocket disconnect");
+                    self.get().await?.http_request_stream(params).await
+                }
+                Err(err) => Err(err),
+            }
         }
         .boxed()
     }
@@ -1156,6 +1148,7 @@ mod tests {
     use super::ExecServerClientConnectOptions;
     use super::ExecServerError;
     use super::RemoteExecServerClient;
+    use crate::ExecBackend;
     use crate::ProcessId;
     #[cfg(not(windows))]
     use crate::client_api::DEFAULT_REMOTE_EXEC_SERVER_INITIALIZE_TIMEOUT;
@@ -1166,15 +1159,18 @@ mod tests {
     use crate::process::ExecProcessEvent;
     use crate::protocol::EXEC_CLOSED_METHOD;
     use crate::protocol::EXEC_EXITED_METHOD;
+    use crate::protocol::EXEC_METHOD;
     use crate::protocol::EXEC_OUTPUT_DELTA_METHOD;
     use crate::protocol::ExecClosedNotification;
     use crate::protocol::ExecExitedNotification;
     use crate::protocol::ExecOutputDeltaNotification;
     use crate::protocol::ExecOutputStream;
+    use crate::protocol::ExecParams;
     use crate::protocol::INITIALIZE_METHOD;
     use crate::protocol::INITIALIZED_METHOD;
     use crate::protocol::InitializeResponse;
     use crate::protocol::ProcessOutputChunk;
+    use crate::remote_process::RemoteProcess;
 
     async fn read_jsonrpc_line<R>(lines: &mut tokio::io::Lines<BufReader<R>>) -> JSONRPCMessage
     where
@@ -1826,6 +1822,68 @@ mod tests {
         assert!(
             !server.await.expect("server task should finish"),
             "cached terminal resume error should avoid another reconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_process_start_does_not_retry_after_transport_disconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let websocket_url = format!(
+            "ws://{}",
+            listener.local_addr().expect("listener should have address")
+        );
+        let server = tokio::spawn(async move {
+            let mut first = accept_websocket(&listener).await;
+            complete_websocket_initialize(
+                &mut first,
+                "session-1",
+                /*expected_resume_session_id*/ None,
+            )
+            .await;
+
+            let request = read_jsonrpc_websocket(&mut first).await;
+            match request {
+                JSONRPCMessage::Request(request) if request.method == EXEC_METHOD => {}
+                other => panic!("expected exec request, got {other:?}"),
+            }
+            first
+                .close(None)
+                .await
+                .expect("first websocket should close");
+
+            timeout(Duration::from_millis(700), listener.accept())
+                .await
+                .is_ok()
+        });
+
+        let client = RemoteExecServerClient::new(ExecServerTransportParams::WebSocketUrl {
+            websocket_url,
+            connect_timeout: Duration::from_secs(1),
+            initialize_timeout: Duration::from_secs(1),
+        });
+        let process = RemoteProcess::new(client);
+        let err = process
+            .start(ExecParams {
+                process_id: ProcessId::from("process-1"),
+                argv: vec!["true".to_string()],
+                cwd: "/tmp".into(),
+                env_policy: None,
+                env: HashMap::new(),
+                tty: false,
+                pipe_stdin: false,
+                arg0: None,
+            })
+            .await
+            .expect_err("exec start should surface disconnect");
+        assert!(matches!(
+            err,
+            ExecServerError::Closed | ExecServerError::Disconnected(_)
+        ));
+        assert!(
+            !server.await.expect("server task should finish"),
+            "exec start disconnect should not reconnect and replay"
         );
     }
 

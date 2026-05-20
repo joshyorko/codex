@@ -35,21 +35,12 @@ impl RemoteProcess {
 impl ExecBackend for RemoteProcess {
     async fn start(&self, params: ExecParams) -> Result<StartedExecProcess, ExecServerError> {
         let process_id = params.process_id.clone();
-        let session = self
-            .client
-            .request(|client| {
-                let params = params.clone();
-                let process_id = process_id.clone();
-                async move {
-                    let session = client.register_session(&process_id).await?;
-                    if let Err(err) = client.exec(params).await {
-                        session.unregister().await;
-                        return Err(err);
-                    }
-                    Ok(session)
-                }
-            })
-            .await?;
+        let client = self.client.get().await?;
+        let session = client.register_session(&process_id).await?;
+        if let Err(err) = client.exec(params).await {
+            session.unregister().await;
+            return Err(err);
+        }
 
         Ok(StartedExecProcess {
             process: Arc::new(RemoteExecProcess { session }),
