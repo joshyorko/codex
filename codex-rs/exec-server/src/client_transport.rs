@@ -21,6 +21,7 @@ use crate::relay::harness_connection_from_websocket;
 const ENVIRONMENT_CLIENT_NAME: &str = "codex-environment";
 
 impl ExecServerClient {
+    #[cfg(test)]
     pub(crate) async fn connect_for_transport(
         transport_params: crate::client_api::ExecServerTransportParams,
     ) -> Result<Self, ExecServerError> {
