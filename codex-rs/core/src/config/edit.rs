@@ -7,6 +7,7 @@ use codex_config::types::SessionPickerViewMode;
 use codex_config::types::ToolSuggestDisabledTool;
 use codex_features::FEATURES;
 use codex_protocol::config_types::Personality;
+use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -552,11 +553,14 @@ impl ConfigDocument {
                 service_tier.as_ref().map(|service_tier| {
                     // Keep the legacy config spelling stable. Runtime values use
                     // `priority`, but config.toml continues to store it as `fast`.
-                    let config_value = match ServiceTier::from_request_value(service_tier) {
-                        Some(ServiceTier::Default) => "default",
-                        Some(ServiceTier::Fast) => "fast",
-                        Some(ServiceTier::Flex) => "flex",
-                        None => service_tier.as_str(),
+                    let config_value = if service_tier == SERVICE_TIER_DEFAULT_REQUEST_VALUE {
+                        SERVICE_TIER_DEFAULT_REQUEST_VALUE
+                    } else {
+                        match ServiceTier::from_request_value(service_tier) {
+                            Some(ServiceTier::Fast) => "fast",
+                            Some(ServiceTier::Flex) => "flex",
+                            None => service_tier.as_str(),
+                        }
                     };
                     value(config_value)
                 }),
