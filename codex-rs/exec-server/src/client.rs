@@ -245,13 +245,13 @@ impl LazyRemoteExecServerClient {
                     {
                         return Ok(client.clone());
                     }
-                    LazyRemoteExecServerClientState::Connected(client)
+                    LazyRemoteExecServerClientState::Connected(connected_client)
                         if matches!(
                             &self.transport_params,
                             ExecServerTransportParams::WebSocketUrl { .. }
                         ) =>
                     {
-                        let resume_session_id = client.session_id().ok_or_else(|| {
+                        let resume_session_id = connected_client.session_id().ok_or_else(|| {
                             ExecServerError::Protocol(
                                 "disconnected exec-server websocket client has no session id"
                                     .to_string(),
@@ -370,6 +370,7 @@ impl LazyRemoteExecServerClient {
         self.get().await?.call(method, params).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn register_session(
         &self,
         process_id: &ProcessId,
