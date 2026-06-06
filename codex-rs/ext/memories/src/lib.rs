@@ -1,9 +1,17 @@
 mod backend;
+mod codex_memoryd;
 mod extension;
+mod honcho;
+pub mod import_local;
 mod local;
 mod metrics;
+mod policy;
+mod portable_schema;
 mod prompts;
+mod provider;
+mod runtime;
 mod schema;
+mod selected;
 mod tools;
 
 pub use extension::install;

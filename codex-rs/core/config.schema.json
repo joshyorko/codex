@@ -754,6 +754,12 @@
       },
       "type": "object"
     },
+    "CrossProfilePolicy": {
+      "enum": [
+        "default_deny"
+      ],
+      "type": "string"
+    },
     "DebugConfigLockToml": {
       "additionalProperties": false,
       "properties": {
@@ -1217,6 +1223,15 @@
       ],
       "description": "One action binding value in config.\n\nThis accepts either:\n\n1. A single key spec string (`\"ctrl-a\"`). 2. A list of key spec strings (`[\"ctrl-a\", \"alt-a\"]`).\n\nAn empty list explicitly unbinds the action in that scope. Because an explicit empty list is still a configured value, runtime resolution must not fall through to global or built-in defaults for that action."
     },
+    "LocalImportPolicy": {
+      "enum": [
+        "prompt",
+        "manual",
+        "startup_preview",
+        "startup_apply"
+      ],
+      "type": "string"
+    },
     "MarketplaceConfig": {
       "additionalProperties": false,
       "properties": {
@@ -1335,9 +1350,29 @@
       "additionalProperties": false,
       "description": "Memories settings loaded from config.toml.",
       "properties": {
+        "assistant_peer": {
+          "description": "Assistant peer ID compatibility setting for providers that model peers.",
+          "type": "string"
+        },
+        "backend": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MemoryBackendKind"
+            }
+          ],
+          "description": "Selects the memory storage backend."
+        },
         "consolidation_model": {
           "description": "Model used for memory consolidation.",
           "type": "string"
+        },
+        "cross_profile_policy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CrossProfilePolicy"
+            }
+          ],
+          "description": "Policy for profile-boundary exports."
         },
         "dedicated_tools": {
           "description": "When `true`, expose dedicated memory tools through the extension tool surface.",
@@ -1354,6 +1389,22 @@
         "generate_memories": {
           "description": "When `false`, newly created threads are stored with `memory_mode = \"disabled\"` in the state DB.",
           "type": "boolean"
+        },
+        "honcho_api_key_env": {
+          "description": "Environment variable that contains the Honcho API key.",
+          "type": "string"
+        },
+        "honcho_base_url": {
+          "description": "Honcho API base URL compatibility alias. Prefer `provider_url`.",
+          "type": "string"
+        },
+        "local_import_policy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/LocalImportPolicy"
+            }
+          ],
+          "description": "Policy for importing existing local Codex memory into a provider."
         },
         "max_raw_memories_for_consolidation": {
           "description": "Maximum number of recent raw memories retained for global consolidation.",
@@ -1391,12 +1442,94 @@
           "format": "int64",
           "type": "integer"
         },
+        "profile": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MemoryProfile"
+            }
+          ],
+          "description": "Portable memory profile used for boundary checks."
+        },
+        "provider": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MemoryProviderKind"
+            }
+          ],
+          "description": "Selects the portable provider used when `backend` is `provider` or `hybrid`."
+        },
+        "provider_url": {
+          "description": "HTTP provider base URL, for example `http://127.0.0.1:8787`.",
+          "type": "string"
+        },
+        "sync_policy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MemorySyncPolicy"
+            }
+          ],
+          "description": "Policy for syncing local memory artifacts upward."
+        },
         "use_memories": {
           "description": "When `false`, skip injecting memory usage instructions into developer prompts.",
           "type": "boolean"
+        },
+        "user_peer": {
+          "description": "Human peer ID compatibility setting for providers that model peers.",
+          "type": "string"
+        },
+        "workspace": {
+          "description": "Portable memory workspace ID used by provider-backed memory.",
+          "type": "string"
+        },
+        "write_policy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MemoryWritePolicy"
+            }
+          ],
+          "description": "Policy for syncing visible conversation turns."
         }
       },
       "type": "object"
+    },
+    "MemoryBackendKind": {
+      "enum": [
+        "local",
+        "provider",
+        "hybrid"
+      ],
+      "type": "string"
+    },
+    "MemoryProfile": {
+      "enum": [
+        "personal",
+        "work",
+        "oss",
+        "homelab"
+      ],
+      "type": "string"
+    },
+    "MemoryProviderKind": {
+      "enum": [
+        "honcho",
+        "codex_memoryd"
+      ],
+      "type": "string"
+    },
+    "MemorySyncPolicy": {
+      "enum": [
+        "manual",
+        "startup"
+      ],
+      "type": "string"
+    },
+    "MemoryWritePolicy": {
+      "enum": [
+        "off",
+        "visible_turns"
+      ],
+      "type": "string"
     },
     "ModelAvailabilityNuxConfig": {
       "additionalProperties": {

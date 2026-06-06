@@ -1,3 +1,4 @@
+use clap::ArgGroup;
 use clap::Args;
 use clap::CommandFactory;
 use clap::Parser;
@@ -77,6 +78,8 @@ use codex_features::is_known_feature_key;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::read_codex_access_token_from_env;
+use codex_memories_extension::import_local::ImportLocalCodexMemoryMode;
+use codex_memories_extension::import_local::import_local_codex_memory;
 use codex_memories_write::clear_memory_roots_contents;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
@@ -136,6 +139,9 @@ enum Subcommand {
 
     /// Manage Codex plugins.
     Plugin(PluginCli),
+
+    /// Manage Codex memory import and sync.
+    Memory(MemoryCommand),
 
     /// Start Codex as an MCP server (stdio).
     McpServer(McpServerCommand),
@@ -209,6 +215,38 @@ struct CompletionCommand {
     /// Shell to generate completions for
     #[clap(value_enum, default_value_t = Shell::Bash)]
     shell: Shell,
+}
+
+#[derive(Debug, Parser)]
+struct MemoryCommand {
+    #[command(subcommand)]
+    subcommand: MemorySubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum MemorySubcommand {
+    /// Import local Codex memory into the configured portable memory provider.
+    #[clap(name = "import-local")]
+    ImportLocal(ImportLocalCommand),
+}
+
+#[derive(Debug, Args)]
+#[command(
+    group(
+        ArgGroup::new("mode")
+            .args(["preview", "apply"])
+            .required(true)
+            .multiple(false)
+    )
+)]
+struct ImportLocalCommand {
+    /// Inspect local Codex memory and print the sync request summary without writing to a provider.
+    #[arg(long)]
+    preview: bool,
+
+    /// Apply the local Codex memory import to the configured portable memory provider.
+    #[arg(long)]
+    apply: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1029,6 +1067,18 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                         .parse_overrides()
                         .map_err(anyhow::Error::msg)?;
                     plugin_cmd::run_plugin_remove(overrides, args).await?;
+                }
+            }
+        }
+        Some(Subcommand::Memory(MemoryCommand { subcommand })) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "memory",
+            )?;
+            match subcommand {
+                MemorySubcommand::ImportLocal(cmd) => {
+                    run_memory_import_local_command(cmd, &root_config_overrides).await?;
                 }
             }
         }
@@ -1899,6 +1949,27 @@ async fn run_debug_models_command(
     Ok(())
 }
 
+async fn run_memory_import_local_command(
+    cmd: ImportLocalCommand,
+    root_config_overrides: &CliConfigOverrides,
+) -> anyhow::Result<()> {
+    let cli_kv_overrides = root_config_overrides
+        .parse_overrides()
+        .map_err(anyhow::Error::msg)?;
+    let config = ConfigBuilder::default()
+        .cli_overrides(cli_kv_overrides)
+        .build()
+        .await?;
+    let mode = match (cmd.preview, cmd.apply) {
+        (true, false) => ImportLocalCodexMemoryMode::Preview,
+        (false, true) => ImportLocalCodexMemoryMode::Apply,
+        _ => anyhow::bail!("choose exactly one of --preview or --apply"),
+    };
+    let report = import_local_codex_memory(&config.codex_home, &config.memories, mode).await?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
 async fn run_debug_clear_memories_command(
     root_config_overrides: &CliConfigOverrides,
 ) -> anyhow::Result<()> {
@@ -2007,6 +2078,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::RemoteControl(remote_control)) => Some(remote_control.subcommand_name()),
         Some(Subcommand::Mcp(_)) => Some("mcp"),
         Some(Subcommand::Plugin(_)) => Some("plugin"),
+        Some(Subcommand::Memory(_)) => Some("memory"),
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         Some(Subcommand::App(_)) => Some("app"),
         Some(Subcommand::Login(_)) => Some("login"),
@@ -2772,6 +2844,42 @@ mod tests {
         .expect("parse");
 
         assert!(matches!(cli.subcommand, Some(Subcommand::Plugin(_))));
+    }
+
+    #[test]
+    fn memory_import_local_parses_preview_and_apply() {
+        for flag in ["--preview", "--apply"] {
+            let cli = MultitoolCli::try_parse_from(["codex", "memory", "import-local", flag])
+                .expect("parse memory import-local");
+            let Some(Subcommand::Memory(MemoryCommand {
+                subcommand: MemorySubcommand::ImportLocal(cmd),
+            })) = cli.subcommand
+            else {
+                panic!("expected memory import-local command");
+            };
+            assert_eq!(cmd.preview, flag == "--preview");
+            assert_eq!(cmd.apply, flag == "--apply");
+        }
+    }
+
+    #[test]
+    fn memory_import_local_requires_one_mode() {
+        let missing =
+            MultitoolCli::try_parse_from(["codex", "memory", "import-local"]).expect_err("mode");
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let conflict = MultitoolCli::try_parse_from([
+            "codex",
+            "memory",
+            "import-local",
+            "--preview",
+            "--apply",
+        ])
+        .expect_err("mode conflict");
+        assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

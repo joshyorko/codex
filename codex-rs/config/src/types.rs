@@ -260,6 +260,32 @@ pub struct ToolSuggestConfig {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct MemoriesToml {
+    /// Selects the memory storage backend.
+    pub backend: Option<MemoryBackendKind>,
+    /// Selects the portable provider used when `backend` is `provider` or `hybrid`.
+    pub provider: Option<MemoryProviderKind>,
+    /// Portable memory profile used for boundary checks.
+    pub profile: Option<MemoryProfile>,
+    /// Portable memory workspace ID used by provider-backed memory.
+    pub workspace: Option<String>,
+    /// Human peer ID compatibility setting for providers that model peers.
+    pub user_peer: Option<String>,
+    /// Assistant peer ID compatibility setting for providers that model peers.
+    pub assistant_peer: Option<String>,
+    /// HTTP provider base URL, for example `http://127.0.0.1:8787`.
+    pub provider_url: Option<String>,
+    /// Honcho API base URL compatibility alias. Prefer `provider_url`.
+    pub honcho_base_url: Option<String>,
+    /// Environment variable that contains the Honcho API key.
+    pub honcho_api_key_env: Option<String>,
+    /// Policy for syncing visible conversation turns.
+    pub write_policy: Option<MemoryWritePolicy>,
+    /// Policy for syncing local memory artifacts upward.
+    pub sync_policy: Option<MemorySyncPolicy>,
+    /// Policy for importing existing local Codex memory into a provider.
+    pub local_import_policy: Option<LocalImportPolicy>,
+    /// Policy for profile-boundary exports.
+    pub cross_profile_policy: Option<CrossProfilePolicy>,
     /// When `true`, external context sources mark the thread `memory_mode` as `"polluted"`.
     #[serde(alias = "no_memories_if_mcp_or_web_search")]
     pub disable_on_external_context: Option<bool>,
@@ -293,6 +319,19 @@ pub struct MemoriesToml {
 /// Effective memories settings after defaults are applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MemoriesConfig {
+    pub backend: MemoryBackendKind,
+    pub provider: MemoryProviderKind,
+    pub profile: MemoryProfile,
+    pub workspace: String,
+    pub user_peer: String,
+    pub assistant_peer: String,
+    pub provider_url: Option<String>,
+    pub honcho_base_url: Option<String>,
+    pub honcho_api_key_env: Option<String>,
+    pub write_policy: MemoryWritePolicy,
+    pub sync_policy: MemorySyncPolicy,
+    pub local_import_policy: LocalImportPolicy,
+    pub cross_profile_policy: CrossProfilePolicy,
     pub disable_on_external_context: bool,
     pub generate_memories: bool,
     pub use_memories: bool,
@@ -310,6 +349,19 @@ pub struct MemoriesConfig {
 impl Default for MemoriesConfig {
     fn default() -> Self {
         Self {
+            backend: MemoryBackendKind::Local,
+            provider: MemoryProviderKind::Honcho,
+            profile: MemoryProfile::Personal,
+            workspace: "default".to_string(),
+            user_peer: "user".to_string(),
+            assistant_peer: "codex".to_string(),
+            provider_url: None,
+            honcho_base_url: None,
+            honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
+            write_policy: MemoryWritePolicy::VisibleTurns,
+            sync_policy: MemorySyncPolicy::Manual,
+            local_import_policy: LocalImportPolicy::Manual,
+            cross_profile_policy: CrossProfilePolicy::DefaultDeny,
             disable_on_external_context: false,
             generate_memories: true,
             use_memories: true,
@@ -329,7 +381,29 @@ impl Default for MemoriesConfig {
 impl From<MemoriesToml> for MemoriesConfig {
     fn from(toml: MemoriesToml) -> Self {
         let defaults = Self::default();
+        let sync_policy = toml.sync_policy.unwrap_or(defaults.sync_policy);
+        let honcho_base_url = toml.honcho_base_url.or(defaults.honcho_base_url);
+        let provider_url = toml.provider_url.or_else(|| honcho_base_url.clone());
+        let local_import_policy = toml.local_import_policy.unwrap_or(match sync_policy {
+            MemorySyncPolicy::Manual => defaults.local_import_policy,
+            MemorySyncPolicy::Startup => LocalImportPolicy::StartupApply,
+        });
         Self {
+            backend: toml.backend.unwrap_or(defaults.backend),
+            provider: toml.provider.unwrap_or(defaults.provider),
+            profile: toml.profile.unwrap_or(defaults.profile),
+            workspace: toml.workspace.unwrap_or(defaults.workspace),
+            user_peer: toml.user_peer.unwrap_or(defaults.user_peer),
+            assistant_peer: toml.assistant_peer.unwrap_or(defaults.assistant_peer),
+            provider_url,
+            honcho_base_url,
+            honcho_api_key_env: toml.honcho_api_key_env.or(defaults.honcho_api_key_env),
+            write_policy: toml.write_policy.unwrap_or(defaults.write_policy),
+            sync_policy,
+            local_import_policy,
+            cross_profile_policy: toml
+                .cross_profile_policy
+                .unwrap_or(defaults.cross_profile_policy),
             disable_on_external_context: toml
                 .disable_on_external_context
                 .unwrap_or(defaults.disable_on_external_context),
@@ -370,6 +444,80 @@ impl From<MemoriesToml> for MemoriesConfig {
             consolidation_model: toml.consolidation_model,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryBackendKind {
+    Local,
+    #[serde(alias = "honcho")]
+    Provider,
+    Hybrid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryProviderKind {
+    Honcho,
+    CodexMemoryd,
+}
+
+impl MemoryProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Honcho => "honcho",
+            Self::CodexMemoryd => "codex_memoryd",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryProfile {
+    Personal,
+    Work,
+    Oss,
+    Homelab,
+}
+
+impl MemoryProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Personal => "personal",
+            Self::Work => "work",
+            Self::Oss => "oss",
+            Self::Homelab => "homelab",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryWritePolicy {
+    Off,
+    VisibleTurns,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySyncPolicy {
+    Manual,
+    Startup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalImportPolicy {
+    Prompt,
+    Manual,
+    StartupPreview,
+    StartupApply,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CrossProfilePolicy {
+    DefaultDeny,
 }
 
 /// Default settings that apply to all apps.

@@ -2270,6 +2270,7 @@ dependencies = [
  "codex-login",
  "codex-mcp",
  "codex-mcp-server",
+ "codex-memories-extension",
  "codex-memories-write",
  "codex-model-provider",
  "codex-models-manager",
@@ -3230,21 +3231,27 @@ name = "codex-memories-extension"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "codex-config",
  "codex-core",
  "codex-extension-api",
  "codex-features",
+ "codex-login",
  "codex-otel",
+ "codex-protocol",
  "codex-tools",
  "codex-utils-absolute-path",
  "codex-utils-output-truncation",
  "codex-utils-template",
  "pretty_assertions",
+ "reqwest 0.12.28",
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
