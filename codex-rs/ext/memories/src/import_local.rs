@@ -2,6 +2,7 @@ use std::path::Component;
 use std::path::Path;
 use std::sync::Arc;
 
+use codex_config::types::LocalImportPolicy;
 use codex_config::types::MemoriesConfig;
 use codex_config::types::MemoryBackendKind;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -127,7 +128,7 @@ pub(crate) async fn sync_local_codex_memory_with_provider(
         files: collected.report_files,
     };
 
-    if !matches!(mode, ImportLocalCodexMemoryMode::Apply) {
+    if matches!(mode, ImportLocalCodexMemoryMode::Preview) && provider.is_none() {
         return Ok(report);
     }
 
@@ -138,10 +139,15 @@ pub(crate) async fn sync_local_codex_memory_with_provider(
 
     let response = provider
         .sync_local_files(LocalCodexMemorySyncRequest {
-            mode: LocalCodexMemorySyncMode::Apply,
+            mode: mode.into(),
             endpoint: LOCAL_CODEX_MEMORY_SYNC_ENDPOINT,
             profile: settings.profile.as_str().to_string(),
             workspace: settings.workspace.clone(),
+            source_root: codex_home
+                .join("memories")
+                .to_path_buf()
+                .display()
+                .to_string(),
             files: collected.files,
         })
         .await;
@@ -349,10 +355,21 @@ fn settings_from_config(memories: &MemoriesConfig) -> PortableMemorySettings {
         workspace: memories.workspace.clone(),
         user_peer: memories.user_peer.clone(),
         assistant_peer: memories.assistant_peer.clone(),
+        provider: memories.provider,
+        provider_url: memories.provider_url.clone(),
         honcho_base_url: memories.honcho_base_url.clone(),
         honcho_api_key_env: memories.honcho_api_key_env.clone(),
         write_policy: memories.write_policy,
         sync_policy: memories.sync_policy,
+        local_import_policy: memories.local_import_policy,
         cross_profile_policy: memories.cross_profile_policy,
+    }
+}
+
+pub(crate) fn startup_import_mode(policy: LocalImportPolicy) -> Option<ImportLocalCodexMemoryMode> {
+    match policy {
+        LocalImportPolicy::StartupPreview => Some(ImportLocalCodexMemoryMode::Preview),
+        LocalImportPolicy::StartupApply => Some(ImportLocalCodexMemoryMode::Apply),
+        LocalImportPolicy::Prompt | LocalImportPolicy::Manual => None,
     }
 }

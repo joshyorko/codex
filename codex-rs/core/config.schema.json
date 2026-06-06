@@ -1223,6 +1223,15 @@
       ],
       "description": "One action binding value in config.\n\nThis accepts either:\n\n1. A single key spec string (`\"ctrl-a\"`). 2. A list of key spec strings (`[\"ctrl-a\", \"alt-a\"]`).\n\nAn empty list explicitly unbinds the action in that scope. Because an explicit empty list is still a configured value, runtime resolution must not fall through to global or built-in defaults for that action."
     },
+    "LocalImportPolicy": {
+      "enum": [
+        "prompt",
+        "manual",
+        "startup_preview",
+        "startup_apply"
+      ],
+      "type": "string"
+    },
     "MarketplaceConfig": {
       "additionalProperties": false,
       "properties": {
@@ -1342,7 +1351,7 @@
       "description": "Memories settings loaded from config.toml.",
       "properties": {
         "assistant_peer": {
-          "description": "Honcho peer ID for the Codex assistant.",
+          "description": "Assistant peer ID compatibility setting for providers that model peers.",
           "type": "string"
         },
         "backend": {
@@ -1386,8 +1395,16 @@
           "type": "string"
         },
         "honcho_base_url": {
-          "description": "Honcho API base URL. Defaults to Honcho Cloud when unset.",
+          "description": "Honcho API base URL compatibility alias. Prefer `provider_url`.",
           "type": "string"
+        },
+        "local_import_policy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/LocalImportPolicy"
+            }
+          ],
+          "description": "Policy for importing existing local Codex memory into a provider."
         },
         "max_raw_memories_for_consolidation": {
           "description": "Maximum number of recent raw memories retained for global consolidation.",
@@ -1433,6 +1450,18 @@
           ],
           "description": "Portable memory profile used for boundary checks."
         },
+        "provider": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MemoryProviderKind"
+            }
+          ],
+          "description": "Selects the portable provider used when `backend` is `provider` or `hybrid`."
+        },
+        "provider_url": {
+          "description": "HTTP provider base URL, for example `http://127.0.0.1:8787`.",
+          "type": "string"
+        },
         "sync_policy": {
           "allOf": [
             {
@@ -1446,11 +1475,11 @@
           "type": "boolean"
         },
         "user_peer": {
-          "description": "Honcho peer ID for the human user.",
+          "description": "Human peer ID compatibility setting for providers that model peers.",
           "type": "string"
         },
         "workspace": {
-          "description": "Honcho workspace ID used by portable memory backends.",
+          "description": "Portable memory workspace ID used by provider-backed memory.",
           "type": "string"
         },
         "write_policy": {
@@ -1467,7 +1496,7 @@
     "MemoryBackendKind": {
       "enum": [
         "local",
-        "honcho",
+        "provider",
         "hybrid"
       ],
       "type": "string"
@@ -1478,6 +1507,13 @@
         "work",
         "oss",
         "homelab"
+      ],
+      "type": "string"
+    },
+    "MemoryProviderKind": {
+      "enum": [
+        "honcho",
+        "codex_memoryd"
       ],
       "type": "string"
     },

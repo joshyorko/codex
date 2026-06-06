@@ -78,14 +78,17 @@ fn tools_are_not_contributed_when_disabled() {
         enabled: false,
         dedicated_tools: true,
         backend: codex_config::types::MemoryBackendKind::Local,
+        provider: codex_config::types::MemoryProviderKind::Honcho,
         profile: codex_config::types::MemoryProfile::Personal,
         workspace: "default".to_string(),
         user_peer: "user".to_string(),
         assistant_peer: "codex".to_string(),
+        provider_url: None,
         honcho_base_url: None,
         honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
         write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
         sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        local_import_policy: codex_config::types::LocalImportPolicy::Manual,
         cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
     });
@@ -105,14 +108,17 @@ fn tools_are_not_contributed_when_dedicated_tools_disabled() {
         enabled: true,
         dedicated_tools: false,
         backend: codex_config::types::MemoryBackendKind::Local,
+        provider: codex_config::types::MemoryProviderKind::Honcho,
         profile: codex_config::types::MemoryProfile::Personal,
         workspace: "default".to_string(),
         user_peer: "user".to_string(),
         assistant_peer: "codex".to_string(),
+        provider_url: None,
         honcho_base_url: None,
         honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
         write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
         sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        local_import_policy: codex_config::types::LocalImportPolicy::Manual,
         cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
     });
@@ -132,14 +138,17 @@ fn tools_are_contributed_when_enabled_with_dedicated_tools() {
         enabled: true,
         dedicated_tools: true,
         backend: codex_config::types::MemoryBackendKind::Local,
+        provider: codex_config::types::MemoryProviderKind::Honcho,
         profile: codex_config::types::MemoryProfile::Personal,
         workspace: "default".to_string(),
         user_peer: "user".to_string(),
         assistant_peer: "codex".to_string(),
+        provider_url: None,
         honcho_base_url: None,
         honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
         write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
         sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        local_import_policy: codex_config::types::LocalImportPolicy::Manual,
         cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
     });
@@ -171,14 +180,17 @@ fn install_registers_dedicated_tool_contributor() {
         enabled: true,
         dedicated_tools: true,
         backend: codex_config::types::MemoryBackendKind::Local,
+        provider: codex_config::types::MemoryProviderKind::Honcho,
         profile: codex_config::types::MemoryProfile::Personal,
         workspace: "default".to_string(),
         user_peer: "user".to_string(),
         assistant_peer: "codex".to_string(),
+        provider_url: None,
         honcho_base_url: None,
         honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
         write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
         sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        local_import_policy: codex_config::types::LocalImportPolicy::Manual,
         cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
     });
@@ -256,14 +268,17 @@ async fn prompt_contribution_uses_memory_summary_when_enabled() {
         enabled: true,
         dedicated_tools: false,
         backend: codex_config::types::MemoryBackendKind::Local,
+        provider: codex_config::types::MemoryProviderKind::Honcho,
         profile: codex_config::types::MemoryProfile::Personal,
         workspace: "default".to_string(),
         user_peer: "user".to_string(),
         assistant_peer: "codex".to_string(),
+        provider_url: None,
         honcho_base_url: None,
         honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
         write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
         sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        local_import_policy: codex_config::types::LocalImportPolicy::Manual,
         cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
         codex_home: tempdir.path().abs(),
     });
@@ -286,7 +301,7 @@ async fn portable_prompt_contribution_describes_provider_without_local_summary()
     let extension = MemoriesExtension::default();
     let thread_store = ExtensionData::new("thread");
     thread_store.insert(honcho_config(
-        codex_config::types::MemoryBackendKind::Honcho,
+        codex_config::types::MemoryBackendKind::Provider,
         "codex-memory-lab",
     ));
 
@@ -322,17 +337,17 @@ async fn honcho_recall_is_injected_through_turn_input_contributor() {
         peer_card: vec!["Linux-first workstation.".to_string()],
     });
     thread_store.insert(honcho_config(
-        codex_config::types::MemoryBackendKind::Honcho,
+        codex_config::types::MemoryBackendKind::Provider,
         "codex-memory-lab",
     ));
     thread_store.insert(PortableMemoryRuntime::for_provider_tests(
         honcho_settings(
-            codex_config::types::MemoryBackendKind::Honcho,
+            codex_config::types::MemoryBackendKind::Provider,
             "codex-memory-lab",
         ),
         crate::honcho::provider_for_tests(
             honcho_settings(
-                codex_config::types::MemoryBackendKind::Honcho,
+                codex_config::types::MemoryBackendKind::Provider,
                 "codex-memory-lab",
             ),
             client.clone(),
@@ -372,7 +387,7 @@ async fn missing_honcho_config_fails_open_without_recall() {
     let thread_store = ExtensionData::new("thread");
     let turn_store = ExtensionData::new("turn");
     thread_store.insert(honcho_config(
-        codex_config::types::MemoryBackendKind::Honcho,
+        codex_config::types::MemoryBackendKind::Provider,
         "",
     ));
 
@@ -395,6 +410,24 @@ async fn missing_honcho_config_fails_open_without_recall() {
     assert!(fragments.is_empty());
 }
 
+#[test]
+fn missing_codex_memoryd_url_falls_back_to_local_backend() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut settings = honcho_settings(
+        codex_config::types::MemoryBackendKind::Provider,
+        "codex-memory-lab",
+    );
+    settings.provider = codex_config::types::MemoryProviderKind::CodexMemoryd;
+    settings.provider_url = None;
+
+    let selected = SelectedMemoriesBackend::from_settings(
+        LocalMemoriesBackend::from_memory_root(tempdir.path().join("memories")),
+        settings,
+    );
+
+    assert!(matches!(selected, SelectedMemoriesBackend::Local(_)));
+}
+
 #[tokio::test]
 async fn visible_turn_writeback_skips_secret_like_content() {
     let extension = MemoriesExtension::default();
@@ -402,17 +435,17 @@ async fn visible_turn_writeback_skips_secret_like_content() {
     let turn_store = ExtensionData::new("turn");
     let client = InMemoryHonchoMemoryClient::new();
     thread_store.insert(honcho_config(
-        codex_config::types::MemoryBackendKind::Honcho,
+        codex_config::types::MemoryBackendKind::Provider,
         "codex-memory-lab",
     ));
     thread_store.insert(PortableMemoryRuntime::for_provider_tests(
         honcho_settings(
-            codex_config::types::MemoryBackendKind::Honcho,
+            codex_config::types::MemoryBackendKind::Provider,
             "codex-memory-lab",
         ),
         crate::honcho::provider_for_tests(
             honcho_settings(
-                codex_config::types::MemoryBackendKind::Honcho,
+                codex_config::types::MemoryBackendKind::Provider,
                 "codex-memory-lab",
             ),
             client.clone(),
@@ -487,7 +520,7 @@ async fn honcho_add_note_rejects_secret_content_without_filename_error() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let memory_root = tempdir.path().join("memories");
     let settings = honcho_settings(
-        codex_config::types::MemoryBackendKind::Honcho,
+        codex_config::types::MemoryBackendKind::Provider,
         "codex-memory-lab",
     );
     let backend = SelectedMemoriesBackend::Provider {
@@ -649,7 +682,7 @@ async fn import_local_preview_reports_bridge_without_provider_write() {
     .expect("write local memory");
 
     let settings = honcho_settings(
-        codex_config::types::MemoryBackendKind::Honcho,
+        codex_config::types::MemoryBackendKind::Provider,
         "codex-memory-lab",
     );
     let report = crate::import_local::sync_local_codex_memory_with_provider(
@@ -699,7 +732,7 @@ async fn startup_sync_policy_imports_safe_local_memory_files() {
         codex_config::types::MemoryBackendKind::Hybrid,
         "codex-memory-lab",
     );
-    settings.sync_policy = codex_config::types::MemorySyncPolicy::Startup;
+    settings.local_import_policy = codex_config::types::LocalImportPolicy::StartupApply;
     let thread_store = ExtensionData::new("thread");
     thread_store.insert(PortableMemoryRuntime::for_provider_tests(
         settings.clone(),
@@ -1076,14 +1109,17 @@ fn honcho_config(
         enabled: true,
         dedicated_tools: true,
         backend,
+        provider: codex_config::types::MemoryProviderKind::Honcho,
         profile: codex_config::types::MemoryProfile::Personal,
         workspace: workspace.to_string(),
         user_peer: "user".to_string(),
         assistant_peer: "codex".to_string(),
+        provider_url: None,
         honcho_base_url: None,
         honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
         write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
         sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        local_import_policy: codex_config::types::LocalImportPolicy::Manual,
         cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
     }
@@ -1095,14 +1131,17 @@ fn honcho_settings(
 ) -> PortableMemorySettings {
     PortableMemorySettings {
         backend,
+        provider: codex_config::types::MemoryProviderKind::Honcho,
         profile: codex_config::types::MemoryProfile::Personal,
         workspace: workspace.to_string(),
         user_peer: "user".to_string(),
         assistant_peer: "codex".to_string(),
+        provider_url: None,
         honcho_base_url: None,
         honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
         write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
         sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        local_import_policy: codex_config::types::LocalImportPolicy::Manual,
         cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
     }
 }
