@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use codex_config::types::MemoryBackendKind;
+use codex_config::types::MemoryProviderKind;
 
 use crate::backend::AddAdHocMemoryNoteRequest;
 use crate::backend::AddAdHocMemoryNoteResponse;
@@ -12,6 +13,7 @@ use crate::backend::ReadMemoryRequest;
 use crate::backend::ReadMemoryResponse;
 use crate::backend::SearchMemoriesRequest;
 use crate::backend::SearchMemoriesResponse;
+use crate::codex_memoryd::provider_from_settings as codex_memoryd_provider_from_settings;
 use crate::honcho::provider_from_settings as honcho_provider_from_settings;
 use crate::local::LocalMemoriesBackend;
 use crate::portable_schema::PortableMemorySettings;
@@ -38,7 +40,7 @@ impl SelectedMemoriesBackend {
     ) -> Self {
         match settings.backend {
             MemoryBackendKind::Local => Self::Local(local),
-            MemoryBackendKind::Honcho => portable_provider_for_settings(&settings)
+            MemoryBackendKind::Provider => portable_provider_for_settings(&settings)
                 .map(|provider| Self::Provider {
                     local: local.clone(),
                     provider,
@@ -145,9 +147,10 @@ pub(crate) fn portable_provider_for_settings(
 ) -> Option<Arc<dyn MemoryProvider>> {
     match settings.backend {
         MemoryBackendKind::Local => None,
-        MemoryBackendKind::Honcho | MemoryBackendKind::Hybrid => {
-            honcho_provider_from_settings(settings)
-        }
+        MemoryBackendKind::Provider | MemoryBackendKind::Hybrid => match settings.provider {
+            MemoryProviderKind::Honcho => honcho_provider_from_settings(settings),
+            MemoryProviderKind::CodexMemoryd => codex_memoryd_provider_from_settings(settings),
+        },
     }
 }
 

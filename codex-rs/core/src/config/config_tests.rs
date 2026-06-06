@@ -322,6 +322,7 @@ consolidation_model = "gpt-5.2"
             min_rate_limit_remaining_percent: Some(12),
             extract_model: Some("gpt-5-mini".to_string()),
             consolidation_model: Some("gpt-5.2".to_string()),
+            ..MemoriesToml::default()
         }),
         memories_cfg.memories
     );

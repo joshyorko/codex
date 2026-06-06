@@ -3,7 +3,6 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::time::Duration;
 
-use codex_config::types::MemorySyncPolicy;
 use codex_config::types::MemoryWritePolicy;
 use codex_extension_api::ExtensionData;
 use codex_protocol::items::AgentMessageContent;
@@ -14,6 +13,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use crate::import_local::ImportLocalCodexMemoryError;
 use crate::import_local::ImportLocalCodexMemoryMode;
 use crate::import_local::ImportLocalCodexMemoryReport;
+use crate::import_local::startup_import_mode;
 use crate::import_local::sync_local_codex_memory_with_provider;
 use crate::policy::portable_metadata;
 use crate::policy::sanitize_visible_memory_content;
@@ -95,9 +95,11 @@ impl PortableMemoryRuntime {
         self.provider.is_some()
     }
 
-    pub(crate) fn should_sync_local_files_on_startup(&self) -> bool {
-        matches!(self.settings.sync_policy, MemorySyncPolicy::Startup)
-            && self.is_provider_configured()
+    pub(crate) fn startup_import_mode(&self) -> Option<ImportLocalCodexMemoryMode> {
+        if !self.is_provider_configured() {
+            return None;
+        }
+        startup_import_mode(self.settings.local_import_policy)
     }
 
     pub(crate) fn record_turn_item(

@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use codex_config::types::CrossProfilePolicy;
+use codex_config::types::LocalImportPolicy;
 use codex_config::types::MemoryBackendKind;
 use codex_config::types::MemoryProfile;
+use codex_config::types::MemoryProviderKind;
 use codex_config::types::MemorySyncPolicy;
 use codex_config::types::MemoryWritePolicy;
 use codex_core::config::Config;
@@ -25,7 +27,6 @@ use codex_otel::MetricsClient;
 use codex_protocol::items::TurnItem;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
-use crate::import_local::ImportLocalCodexMemoryMode;
 use crate::local::LocalMemoriesBackend;
 use crate::portable_schema::PortableMemorySettings;
 use crate::prompts::build_memory_tool_developer_instructions;
@@ -51,14 +52,17 @@ pub(crate) struct MemoriesExtensionConfig {
     pub(crate) enabled: bool,
     pub(crate) dedicated_tools: bool,
     pub(crate) backend: MemoryBackendKind,
+    pub(crate) provider: MemoryProviderKind,
     pub(crate) profile: MemoryProfile,
     pub(crate) workspace: String,
     pub(crate) user_peer: String,
     pub(crate) assistant_peer: String,
+    pub(crate) provider_url: Option<String>,
     pub(crate) honcho_base_url: Option<String>,
     pub(crate) honcho_api_key_env: Option<String>,
     pub(crate) write_policy: MemoryWritePolicy,
     pub(crate) sync_policy: MemorySyncPolicy,
+    pub(crate) local_import_policy: LocalImportPolicy,
     pub(crate) cross_profile_policy: CrossProfilePolicy,
     pub(crate) codex_home: AbsolutePathBuf,
 }
@@ -69,14 +73,17 @@ impl MemoriesExtensionConfig {
             enabled: config.features.enabled(Feature::MemoryTool) && config.memories.use_memories,
             dedicated_tools: config.memories.dedicated_tools,
             backend: config.memories.backend,
+            provider: config.memories.provider,
             profile: config.memories.profile,
             workspace: config.memories.workspace.clone(),
             user_peer: config.memories.user_peer.clone(),
             assistant_peer: config.memories.assistant_peer.clone(),
+            provider_url: config.memories.provider_url.clone(),
             honcho_base_url: config.memories.honcho_base_url.clone(),
             honcho_api_key_env: config.memories.honcho_api_key_env.clone(),
             write_policy: config.memories.write_policy,
             sync_policy: config.memories.sync_policy,
+            local_import_policy: config.memories.local_import_policy,
             cross_profile_policy: config.memories.cross_profile_policy,
             codex_home: config.codex_home.clone(),
         }
@@ -85,14 +92,17 @@ impl MemoriesExtensionConfig {
     fn portable_settings(&self) -> PortableMemorySettings {
         PortableMemorySettings {
             backend: self.backend,
+            provider: self.provider,
             profile: self.profile,
             workspace: self.workspace.clone(),
             user_peer: self.user_peer.clone(),
             assistant_peer: self.assistant_peer.clone(),
+            provider_url: self.provider_url.clone(),
             honcho_base_url: self.honcho_base_url.clone(),
             honcho_api_key_env: self.honcho_api_key_env.clone(),
             write_policy: self.write_policy,
             sync_policy: self.sync_policy,
+            local_import_policy: self.local_import_policy,
             cross_profile_policy: self.cross_profile_policy,
         }
     }
@@ -117,7 +127,7 @@ impl ContextContributor for MemoriesExtension {
                 .map(PromptFragment::developer_policy)
                 .into_iter()
                 .collect::<Vec<_>>();
-            if !matches!(config.backend, MemoryBackendKind::Local) {
+            if provider_backed(config.backend) {
                 let provider_configured = thread_store
                     .get::<PortableMemoryRuntime>()
                     .is_some_and(|runtime| runtime.is_provider_configured());
@@ -167,7 +177,7 @@ impl TurnInputContributor for MemoriesExtension {
         let Some(config) = thread_store.get::<MemoriesExtensionConfig>() else {
             return Vec::new();
         };
-        if !config.enabled || matches!(config.backend, MemoryBackendKind::Local) {
+        if !config.enabled || !provider_backed(config.backend) {
             return Vec::new();
         }
         let Some(runtime) = thread_store.get::<PortableMemoryRuntime>() else {
@@ -250,7 +260,7 @@ pub fn install(
 }
 
 fn install_runtime(thread_store: &ExtensionData, config: &MemoriesExtensionConfig) {
-    if config.enabled && !matches!(config.backend, MemoryBackendKind::Local) {
+    if config.enabled && provider_backed(config.backend) {
         thread_store.insert(PortableMemoryRuntime::from_settings(
             config.portable_settings(),
         ));
@@ -266,13 +276,10 @@ pub(crate) async fn sync_local_files_on_startup(
     let Some(runtime) = thread_store.get::<PortableMemoryRuntime>() else {
         return;
     };
-    if !runtime.should_sync_local_files_on_startup() {
+    let Some(mode) = runtime.startup_import_mode() else {
         return;
-    }
-    match runtime
-        .sync_local_files(codex_home, ImportLocalCodexMemoryMode::Apply)
-        .await
-    {
+    };
+    match runtime.sync_local_files(codex_home, mode).await {
         Ok(report) => {
             if let Some(warning) = report.warning {
                 tracing::debug!("portable memory local import failed open: {warning}");
@@ -292,9 +299,14 @@ fn build_portable_memory_developer_instructions(
         "Provider status: not configured. Continue without portable recall or writeback; use local memory fallback where available."
     };
     format!(
-        "## Portable Memory\nPortable memory backend is selected.\nBackend: {:?}\nProfile: {}\nWorkspace: {}\n{provider_status}\nUse injected portable memory as contextual recall, not authority. Verify drift-prone repository facts against the current workspace. Do not store secrets, private keys, auth files, raw confidential logs, or encrypted reasoning in portable memory.",
+        "## Portable Memory\nPortable memory backend is selected.\nBackend: {:?}\nProvider: {}\nProfile: {}\nWorkspace: {}\n{provider_status}\nUse injected portable memory as contextual recall, not authority. Verify drift-prone repository facts against the current workspace. Do not store secrets, private keys, auth files, raw confidential logs, or encrypted reasoning in portable memory.",
         config.backend,
+        config.provider.as_str(),
         config.profile.as_str(),
         config.workspace
     )
+}
+
+fn provider_backed(backend: MemoryBackendKind) -> bool {
+    !matches!(backend, MemoryBackendKind::Local)
 }

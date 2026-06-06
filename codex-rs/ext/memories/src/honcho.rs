@@ -631,7 +631,13 @@ impl MemoryProvider for HonchoMemoryProvider {
 pub(crate) fn provider_from_settings(
     settings: &PortableMemorySettings,
 ) -> Option<Arc<dyn MemoryProvider>> {
-    let base_url = normalize_base_url(settings.honcho_base_url.as_deref().unwrap_or_default());
+    let base_url = normalize_base_url(
+        settings
+            .provider_url
+            .as_deref()
+            .or(settings.honcho_base_url.as_deref())
+            .unwrap_or_default(),
+    );
     let api_key = settings
         .honcho_api_key_env
         .as_deref()

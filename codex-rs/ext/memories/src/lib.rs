@@ -1,4 +1,5 @@
 mod backend;
+mod codex_memoryd;
 mod extension;
 mod honcho;
 pub mod import_local;

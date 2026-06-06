@@ -110,7 +110,7 @@ fn memories_config_defaults_to_local_backend() {
 }
 
 #[test]
-fn memories_config_parses_honcho_backend_fields() {
+fn memories_config_parses_honcho_backend_compatibility_fields() {
     let toml: MemoriesToml = toml::from_str(
         r#"
             backend = "honcho"
@@ -130,16 +130,43 @@ fn memories_config_parses_honcho_backend_fields() {
     assert_eq!(
         MemoriesConfig::from(toml),
         MemoriesConfig {
-            backend: MemoryBackendKind::Honcho,
+            backend: MemoryBackendKind::Provider,
+            provider: MemoryProviderKind::Honcho,
             profile: MemoryProfile::Work,
             workspace: "codex-memory-lab".to_string(),
             user_peer: "josh".to_string(),
             assistant_peer: "codex".to_string(),
+            provider_url: Some("http://localhost:8000/v3".to_string()),
             honcho_base_url: Some("http://localhost:8000/v3".to_string()),
             honcho_api_key_env: Some("HONCHO_DEV_KEY".to_string()),
             write_policy: MemoryWritePolicy::VisibleTurns,
             sync_policy: MemorySyncPolicy::Startup,
+            local_import_policy: LocalImportPolicy::StartupApply,
             cross_profile_policy: CrossProfilePolicy::DefaultDeny,
+            ..MemoriesConfig::default()
+        }
+    );
+}
+
+#[test]
+fn memories_config_parses_codex_memoryd_provider_contract() {
+    let toml: MemoriesToml = toml::from_str(
+        r#"
+            backend = "provider"
+            provider = "codex_memoryd"
+            provider_url = "http://127.0.0.1:8787"
+            local_import_policy = "startup_preview"
+        "#,
+    )
+    .expect("memories TOML should parse");
+
+    assert_eq!(
+        MemoriesConfig::from(toml),
+        MemoriesConfig {
+            backend: MemoryBackendKind::Provider,
+            provider: MemoryProviderKind::CodexMemoryd,
+            provider_url: Some("http://127.0.0.1:8787".to_string()),
+            local_import_policy: LocalImportPolicy::StartupPreview,
             ..MemoriesConfig::default()
         }
     );
