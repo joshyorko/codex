@@ -11,6 +11,14 @@ use codex_extension_api::ToolContributor;
 use codex_extension_api::ToolExecutor;
 use codex_extension_api::ToolName;
 use codex_extension_api::ToolPayload;
+use codex_extension_api::TurnInputContext;
+use codex_extension_api::TurnInputContributor;
+use codex_extension_api::TurnItemContributor;
+use codex_protocol::items::AgentMessageContent;
+use codex_protocol::items::AgentMessageItem;
+use codex_protocol::items::TurnItem;
+use codex_protocol::items::UserMessageItem;
+use codex_protocol::user_input::UserInput;
 use codex_tools::ToolOutput;
 use codex_utils_absolute_path::test_support::PathBufExt;
 use codex_utils_absolute_path::test_support::PathExt;
@@ -21,7 +29,13 @@ use serde_json::json;
 
 use crate::extension::MemoriesExtension;
 use crate::extension::MemoriesExtensionConfig;
+use crate::honcho::HonchoMemoryContext;
+use crate::honcho::HonchoMemoryMessage;
+use crate::honcho::InMemoryHonchoMemoryClient;
 use crate::local::LocalMemoriesBackend;
+use crate::portable_schema::PortableMemorySettings;
+use crate::runtime::PortableMemoryRuntime;
+use crate::selected::SelectedMemoriesBackend;
 
 #[test]
 fn memory_tool_namespace_matches_responses_api_identifier() {
@@ -54,6 +68,16 @@ fn tools_are_not_contributed_when_disabled() {
     thread_store.insert(MemoriesExtensionConfig {
         enabled: false,
         dedicated_tools: true,
+        backend: codex_config::types::MemoryBackendKind::Local,
+        profile: codex_config::types::MemoryProfile::Personal,
+        workspace: "default".to_string(),
+        user_peer: "user".to_string(),
+        assistant_peer: "codex".to_string(),
+        honcho_base_url: None,
+        honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
+        write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
+        sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
     });
 
@@ -71,6 +95,16 @@ fn tools_are_not_contributed_when_dedicated_tools_disabled() {
     thread_store.insert(MemoriesExtensionConfig {
         enabled: true,
         dedicated_tools: false,
+        backend: codex_config::types::MemoryBackendKind::Local,
+        profile: codex_config::types::MemoryProfile::Personal,
+        workspace: "default".to_string(),
+        user_peer: "user".to_string(),
+        assistant_peer: "codex".to_string(),
+        honcho_base_url: None,
+        honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
+        write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
+        sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
     });
 
@@ -88,6 +122,16 @@ fn tools_are_contributed_when_enabled_with_dedicated_tools() {
     thread_store.insert(MemoriesExtensionConfig {
         enabled: true,
         dedicated_tools: true,
+        backend: codex_config::types::MemoryBackendKind::Local,
+        profile: codex_config::types::MemoryProfile::Personal,
+        workspace: "default".to_string(),
+        user_peer: "user".to_string(),
+        assistant_peer: "codex".to_string(),
+        honcho_base_url: None,
+        honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
+        write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
+        sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
     });
 
@@ -117,6 +161,16 @@ fn install_registers_dedicated_tool_contributor() {
     thread_store.insert(MemoriesExtensionConfig {
         enabled: true,
         dedicated_tools: true,
+        backend: codex_config::types::MemoryBackendKind::Local,
+        profile: codex_config::types::MemoryProfile::Personal,
+        workspace: "default".to_string(),
+        user_peer: "user".to_string(),
+        assistant_peer: "codex".to_string(),
+        honcho_base_url: None,
+        honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
+        write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
+        sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
     });
 
@@ -136,6 +190,21 @@ fn install_registers_dedicated_tool_contributor() {
             memory_tool_name(crate::SEARCH_TOOL_NAME),
         ]
     );
+}
+
+#[test]
+fn install_registers_memory_lifecycle_contributors() {
+    let mut builder = ExtensionRegistryBuilder::<codex_core::config::Config>::new();
+    crate::install(&mut builder, /*metrics_client*/ None);
+    let registry = builder.build();
+
+    assert_eq!(registry.thread_lifecycle_contributors().len(), 1);
+    assert_eq!(registry.turn_lifecycle_contributors().len(), 1);
+    assert_eq!(registry.config_contributors().len(), 1);
+    assert_eq!(registry.context_contributors().len(), 1);
+    assert_eq!(registry.turn_input_contributors().len(), 1);
+    assert_eq!(registry.turn_item_contributors().len(), 1);
+    assert_eq!(registry.tool_contributors().len(), 1);
 }
 
 #[test]
@@ -177,12 +246,22 @@ async fn prompt_contribution_uses_memory_summary_when_enabled() {
     thread_store.insert(MemoriesExtensionConfig {
         enabled: true,
         dedicated_tools: false,
+        backend: codex_config::types::MemoryBackendKind::Local,
+        profile: codex_config::types::MemoryProfile::Personal,
+        workspace: "default".to_string(),
+        user_peer: "user".to_string(),
+        assistant_peer: "codex".to_string(),
+        honcho_base_url: None,
+        honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
+        write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
+        sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
         codex_home: tempdir.path().abs(),
     });
 
-    let fragments = extension
-        .contribute(&ExtensionData::new("session"), &thread_store)
-        .await;
+    let fragments =
+        ContextContributor::contribute(&extension, &ExtensionData::new("session"), &thread_store)
+            .await;
 
     assert_eq!(fragments.len(), 1);
     assert_eq!(fragments[0].slot(), PromptSlot::DeveloperPolicy);
@@ -191,6 +270,343 @@ async fn prompt_contribution_uses_memory_summary_when_enabled() {
             .text()
             .contains("Remember repository-specific implementation preferences.")
     );
+}
+
+#[tokio::test]
+async fn portable_prompt_contribution_describes_provider_without_local_summary() {
+    let extension = MemoriesExtension::default();
+    let thread_store = ExtensionData::new("thread");
+    thread_store.insert(honcho_config(
+        codex_config::types::MemoryBackendKind::Honcho,
+        "codex-memory-lab",
+    ));
+
+    let fragments =
+        ContextContributor::contribute(&extension, &ExtensionData::new("session"), &thread_store)
+            .await;
+
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].slot(), PromptSlot::DeveloperPolicy);
+    assert!(fragments[0].text().contains("## Portable Memory"));
+    assert!(fragments[0].text().contains("Portable memory is active."));
+    assert!(fragments[0].text().contains("Profile: personal"));
+    assert!(fragments[0].text().contains("Workspace: codex-memory-lab"));
+}
+
+#[tokio::test]
+async fn honcho_recall_is_injected_through_turn_input_contributor() {
+    let extension = MemoriesExtension::default();
+    let thread_store = ExtensionData::new("thread");
+    let turn_store = ExtensionData::new("turn");
+    let client = InMemoryHonchoMemoryClient::new();
+    client.set_context(HonchoMemoryContext {
+        representation: Some("Josh prefers repo-native commands.".to_string()),
+        peer_card: vec!["Linux-first workstation.".to_string()],
+    });
+    thread_store.insert(honcho_config(
+        codex_config::types::MemoryBackendKind::Honcho,
+        "codex-memory-lab",
+    ));
+    thread_store.insert(PortableMemoryRuntime::for_provider_tests(
+        honcho_settings(
+            codex_config::types::MemoryBackendKind::Honcho,
+            "codex-memory-lab",
+        ),
+        crate::honcho::provider_for_tests(
+            honcho_settings(
+                codex_config::types::MemoryBackendKind::Honcho,
+                "codex-memory-lab",
+            ),
+            client.clone(),
+        ),
+    ));
+
+    let fragments = TurnInputContributor::contribute(
+        &extension,
+        TurnInputContext {
+            turn_id: "turn-1".to_string(),
+            user_input: vec![UserInput::Text {
+                text: "inspect memory backend".to_string(),
+                text_elements: Vec::new(),
+            }],
+            environments: Vec::new(),
+        },
+        &ExtensionData::new("session"),
+        &thread_store,
+        &turn_store,
+    )
+    .await;
+
+    assert_eq!(fragments.len(), 1);
+    let rendered = fragments[0].render();
+    assert!(rendered.contains("<codex_portable_memory"));
+    assert!(rendered.contains("Josh prefers repo-native commands."));
+    assert!(rendered.contains("Linux-first workstation."));
+    assert_eq!(
+        client.context_queries(),
+        vec!["inspect memory backend".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn missing_honcho_config_fails_open_without_recall() {
+    let extension = MemoriesExtension::default();
+    let thread_store = ExtensionData::new("thread");
+    let turn_store = ExtensionData::new("turn");
+    thread_store.insert(honcho_config(
+        codex_config::types::MemoryBackendKind::Honcho,
+        "",
+    ));
+
+    let fragments = TurnInputContributor::contribute(
+        &extension,
+        TurnInputContext {
+            turn_id: "turn-1".to_string(),
+            user_input: vec![UserInput::Text {
+                text: "need recall".to_string(),
+                text_elements: Vec::new(),
+            }],
+            environments: Vec::new(),
+        },
+        &ExtensionData::new("session"),
+        &thread_store,
+        &turn_store,
+    )
+    .await;
+
+    assert!(fragments.is_empty());
+}
+
+#[tokio::test]
+async fn visible_turn_writeback_skips_secret_like_content() {
+    let extension = MemoriesExtension::default();
+    let thread_store = ExtensionData::new("thread");
+    let turn_store = ExtensionData::new("turn");
+    let client = InMemoryHonchoMemoryClient::new();
+    thread_store.insert(honcho_config(
+        codex_config::types::MemoryBackendKind::Honcho,
+        "codex-memory-lab",
+    ));
+    thread_store.insert(PortableMemoryRuntime::for_provider_tests(
+        honcho_settings(
+            codex_config::types::MemoryBackendKind::Honcho,
+            "codex-memory-lab",
+        ),
+        crate::honcho::provider_for_tests(
+            honcho_settings(
+                codex_config::types::MemoryBackendKind::Honcho,
+                "codex-memory-lab",
+            ),
+            client.clone(),
+        ),
+    ));
+
+    let mut user_item = TurnItem::UserMessage(UserMessageItem::new(&[UserInput::Text {
+        text: "HONCHO_API_KEY=hch-v3-secret-value".to_string(),
+        text_elements: Vec::new(),
+    }]));
+    let mut assistant_item = TurnItem::AgentMessage(AgentMessageItem {
+        id: "assistant-1".to_string(),
+        content: vec![AgentMessageContent::Text {
+            text: "I will not store that secret.".to_string(),
+        }],
+        phase: None,
+        memory_citation: None,
+    });
+
+    TurnItemContributor::contribute(&extension, &thread_store, &turn_store, &mut user_item)
+        .await
+        .expect("user item contribution should not fail");
+    TurnItemContributor::contribute(&extension, &thread_store, &turn_store, &mut assistant_item)
+        .await
+        .expect("assistant item contribution should not fail");
+    PortableMemoryRuntime::flush_turn_writeback(&thread_store, &turn_store)
+        .await
+        .expect("flush should succeed");
+
+    assert_eq!(
+        client.messages(),
+        vec![HonchoMemoryMessage {
+            peer_id: "codex".to_string(),
+            content: "I will not store that secret.".to_string(),
+            metadata: serde_json::json!({
+                "origin": "codex-turn-item",
+                "profile": "personal",
+                "workspace": "codex-memory-lab",
+                "repo": null,
+                "sensitivity": "public",
+                "portability": "portable",
+                "provenance": "visible-assistant-message",
+                "confidence": "observed"
+            }),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn hybrid_tool_add_note_keeps_local_cache_and_syncs_provider() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let memory_root = tempdir.path().join("memories");
+    let client = InMemoryHonchoMemoryClient::new();
+    let settings = honcho_settings(
+        codex_config::types::MemoryBackendKind::Hybrid,
+        "codex-memory-lab",
+    );
+    let backend = SelectedMemoriesBackend::Hybrid {
+        local: LocalMemoriesBackend::from_memory_root(&memory_root),
+        provider: Some(crate::honcho::provider_for_tests(settings, client.clone())),
+    };
+
+    crate::backend::MemoriesBackend::add_ad_hoc_note(
+        &backend,
+        crate::backend::AddAdHocMemoryNoteRequest {
+            filename: "2026-06-06T12-00-00-hybrid-note.md".to_string(),
+            note: "Hybrid memory keeps a local cache and durable provider copy.".to_string(),
+        },
+    )
+    .await
+    .expect("hybrid add note should succeed");
+
+    assert_eq!(
+        tokio::fs::read_to_string(
+            memory_root
+                .join("extensions/ad_hoc/notes")
+                .join("2026-06-06T12-00-00-hybrid-note.md")
+        )
+        .await
+        .expect("read local hybrid cache"),
+        "Hybrid memory keeps a local cache and durable provider copy."
+    );
+    assert_eq!(client.conclusions().len(), 1);
+    assert_eq!(
+        client.conclusions()[0].content,
+        "Hybrid memory keeps a local cache and durable provider copy."
+    );
+}
+
+#[tokio::test]
+async fn import_local_preview_reports_bridge_without_provider_write() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let memory_root = tempdir.path().join("memories");
+    tokio::fs::create_dir_all(&memory_root)
+        .await
+        .expect("create memories root");
+    tokio::fs::write(
+        memory_root.join("MEMORY.md"),
+        "Josh prefers repo-native commands and explicit provider boundaries.",
+    )
+    .await
+    .expect("write local memory");
+
+    let settings = honcho_settings(
+        codex_config::types::MemoryBackendKind::Honcho,
+        "codex-memory-lab",
+    );
+    let report = crate::import_local::sync_local_codex_memory_with_provider(
+        &tempdir.path().abs(),
+        &settings,
+        crate::import_local::ImportLocalCodexMemoryMode::Preview,
+        None,
+    )
+    .await
+    .expect("preview local import");
+
+    assert_eq!(report.endpoint, "/v1/sync/local-codex-memory");
+    assert_eq!(report.mode, "preview");
+    assert!(!report.provider_configured);
+    assert_eq!(report.accepted_files, 1);
+    assert_eq!(report.synced_files, 0);
+    assert_eq!(report.files[0].path, "MEMORY.md");
+    assert_eq!(
+        report.files[0].status,
+        crate::import_local::ImportLocalCodexMemoryFileStatus::Accepted
+    );
+    assert!(report.files[0].idempotency_key.is_some());
+}
+
+#[tokio::test]
+async fn startup_sync_policy_imports_safe_local_memory_files() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let memory_root = tempdir.path().join("memories");
+    tokio::fs::create_dir_all(&memory_root)
+        .await
+        .expect("create memories root");
+    tokio::fs::write(
+        memory_root.join("MEMORY.md"),
+        "Portable memory should preserve upstream local defaults.",
+    )
+    .await
+    .expect("write safe memory");
+    tokio::fs::write(
+        memory_root.join("secret.md"),
+        "HONCHO_API_KEY=hch-v3-secret-value",
+    )
+    .await
+    .expect("write rejected memory");
+
+    let client = InMemoryHonchoMemoryClient::new();
+    let mut settings = honcho_settings(
+        codex_config::types::MemoryBackendKind::Hybrid,
+        "codex-memory-lab",
+    );
+    settings.sync_policy = codex_config::types::MemorySyncPolicy::Startup;
+    let thread_store = ExtensionData::new("thread");
+    thread_store.insert(PortableMemoryRuntime::for_provider_tests(
+        settings.clone(),
+        crate::honcho::provider_for_tests(settings, client.clone()),
+    ));
+
+    crate::extension::sync_local_files_on_startup(&thread_store, &tempdir.path().abs()).await;
+
+    let conclusions = client.conclusions();
+    assert_eq!(conclusions.len(), 1);
+    assert_eq!(
+        conclusions[0].content,
+        "Portable memory should preserve upstream local defaults."
+    );
+    assert_eq!(
+        conclusions[0].metadata["sync_endpoint"],
+        serde_json::json!("/v1/sync/local-codex-memory")
+    );
+    assert_eq!(
+        conclusions[0].metadata["local_path"],
+        serde_json::json!("MEMORY.md")
+    );
+    assert!(
+        conclusions[0].metadata["idempotency_key"]
+            .as_str()
+            .is_some_and(|key| key.starts_with("codex-local-memory:"))
+    );
+}
+
+#[tokio::test]
+async fn manual_sync_policy_does_not_import_on_startup() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let memory_root = tempdir.path().join("memories");
+    tokio::fs::create_dir_all(&memory_root)
+        .await
+        .expect("create memories root");
+    tokio::fs::write(
+        memory_root.join("MEMORY.md"),
+        "Manual sync waits for CLI apply.",
+    )
+    .await
+    .expect("write memory");
+
+    let client = InMemoryHonchoMemoryClient::new();
+    let settings = honcho_settings(
+        codex_config::types::MemoryBackendKind::Hybrid,
+        "codex-memory-lab",
+    );
+    let thread_store = ExtensionData::new("thread");
+    thread_store.insert(PortableMemoryRuntime::for_provider_tests(
+        settings.clone(),
+        crate::honcho::provider_for_tests(settings, client.clone()),
+    ));
+
+    crate::extension::sync_local_files_on_startup(&thread_store, &tempdir.path().abs()).await;
+
+    assert!(client.conclusions().is_empty());
 }
 
 #[tokio::test]
@@ -500,4 +916,43 @@ fn memory_tool(memory_root: &Path, tool_name: &str) -> Arc<dyn ToolExecutor<Tool
 
 fn memory_tool_name(tool_name: &str) -> ToolName {
     ToolName::namespaced(crate::MEMORY_TOOLS_NAMESPACE, tool_name)
+}
+
+fn honcho_config(
+    backend: codex_config::types::MemoryBackendKind,
+    workspace: &str,
+) -> MemoriesExtensionConfig {
+    MemoriesExtensionConfig {
+        enabled: true,
+        dedicated_tools: true,
+        backend,
+        profile: codex_config::types::MemoryProfile::Personal,
+        workspace: workspace.to_string(),
+        user_peer: "user".to_string(),
+        assistant_peer: "codex".to_string(),
+        honcho_base_url: None,
+        honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
+        write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
+        sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
+        codex_home: test_path_buf("/tmp/codex-home").abs(),
+    }
+}
+
+fn honcho_settings(
+    backend: codex_config::types::MemoryBackendKind,
+    workspace: &str,
+) -> PortableMemorySettings {
+    PortableMemorySettings {
+        backend,
+        profile: codex_config::types::MemoryProfile::Personal,
+        workspace: workspace.to_string(),
+        user_peer: "user".to_string(),
+        assistant_peer: "codex".to_string(),
+        honcho_base_url: None,
+        honcho_api_key_env: Some("HONCHO_API_KEY".to_string()),
+        write_policy: codex_config::types::MemoryWritePolicy::VisibleTurns,
+        sync_policy: codex_config::types::MemorySyncPolicy::Manual,
+        cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
+    }
 }
