@@ -545,7 +545,7 @@ impl MemoryProvider for HonchoMemoryProvider {
         Box::pin(async move {
             let Some(content) = sanitize_visible_memory_content(&request.note) else {
                 return Err(PortableMemoryError::RejectedContent(
-                    "ad-hoc note was rejected".to_string(),
+                    "content rejected by portable memory safety policy".to_string(),
                 ));
             };
             self.conclude(PortableMemoryConclusion {
@@ -696,6 +696,7 @@ pub(crate) fn is_loopback_url(url: &str) -> bool {
     let Some(host) = parsed.host_str() else {
         return false;
     };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
     host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<IpAddr>()
