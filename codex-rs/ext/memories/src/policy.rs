@@ -24,8 +24,8 @@ fn contains_blocked_memory_content(content: &str) -> bool {
         || lower.contains("begin rsa private key")
         || lower.contains(".env")
         || lower.contains("<codex_internal_context")
-        || content.contains("sk-")
-        || content.contains("hch-v")
+        || lower.contains("sk-")
+        || lower.contains("hch-v")
 }
 
 pub(crate) fn portable_metadata(

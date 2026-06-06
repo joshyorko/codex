@@ -24,6 +24,8 @@ pub(crate) enum PortableMemoryError {
     NotConfigured,
     #[error("portable memory provider request failed: {0}")]
     Request(String),
+    #[error("portable memory content rejected by safety policy: {0}")]
+    RejectedContent(String),
     #[error(transparent)]
     Backend(#[from] MemoriesBackendError),
 }

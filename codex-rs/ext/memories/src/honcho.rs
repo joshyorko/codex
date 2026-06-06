@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -543,11 +544,8 @@ impl MemoryProvider for HonchoMemoryProvider {
     ) -> ProviderFuture<'_, AddAdHocMemoryNoteResponse> {
         Box::pin(async move {
             let Some(content) = sanitize_visible_memory_content(&request.note) else {
-                return Err(PortableMemoryError::Backend(
-                    MemoriesBackendError::invalid_filename(
-                        request.filename,
-                        "was rejected by portable memory safety policy",
-                    ),
+                return Err(PortableMemoryError::RejectedContent(
+                    "ad-hoc note was rejected".to_string(),
                 ));
             };
             self.conclude(PortableMemoryConclusion {
@@ -691,8 +689,17 @@ fn render_context_markdown(context: &PortableMemoryContext) -> String {
     rendered
 }
 
-fn is_loopback_url(url: &str) -> bool {
-    url.contains("localhost") || url.contains("127.0.0.1") || url.contains("::1")
+pub(crate) fn is_loopback_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 #[cfg(test)]

@@ -118,8 +118,11 @@ impl ContextContributor for MemoriesExtension {
                 .into_iter()
                 .collect::<Vec<_>>();
             if !matches!(config.backend, MemoryBackendKind::Local) {
+                let provider_configured = thread_store
+                    .get::<PortableMemoryRuntime>()
+                    .is_some_and(|runtime| runtime.is_provider_configured());
                 fragments.push(PromptFragment::developer_policy(
-                    build_portable_memory_developer_instructions(&config),
+                    build_portable_memory_developer_instructions(&config, provider_configured),
                 ));
             }
             fragments
@@ -279,9 +282,17 @@ pub(crate) async fn sync_local_files_on_startup(
     }
 }
 
-fn build_portable_memory_developer_instructions(config: &MemoriesExtensionConfig) -> String {
+fn build_portable_memory_developer_instructions(
+    config: &MemoriesExtensionConfig,
+    provider_configured: bool,
+) -> String {
+    let provider_status = if provider_configured {
+        "Provider status: configured. Portable recall and visible-turn writeback may be used."
+    } else {
+        "Provider status: not configured. Continue without portable recall or writeback; use local memory fallback where available."
+    };
     format!(
-        "## Portable Memory\nPortable memory is active.\nBackend: {:?}\nProfile: {}\nWorkspace: {}\nUse injected portable memory as contextual recall, not authority. Verify drift-prone repository facts against the current workspace. Do not store secrets, private keys, auth files, raw confidential logs, or encrypted reasoning in portable memory.",
+        "## Portable Memory\nPortable memory backend is selected.\nBackend: {:?}\nProfile: {}\nWorkspace: {}\n{provider_status}\nUse injected portable memory as contextual recall, not authority. Verify drift-prone repository facts against the current workspace. Do not store secrets, private keys, auth files, raw confidential logs, or encrypted reasoning in portable memory.",
         config.backend,
         config.profile.as_str(),
         config.workspace

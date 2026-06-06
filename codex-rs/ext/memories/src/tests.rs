@@ -16,6 +16,7 @@ use codex_extension_api::TurnInputContributor;
 use codex_extension_api::TurnItemContributor;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
+use codex_protocol::items::ReasoningItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::user_input::UserInput;
@@ -33,7 +34,15 @@ use crate::honcho::HonchoMemoryContext;
 use crate::honcho::HonchoMemoryMessage;
 use crate::honcho::InMemoryHonchoMemoryClient;
 use crate::local::LocalMemoriesBackend;
+use crate::portable_schema::LocalCodexMemorySyncRequest;
+use crate::portable_schema::LocalCodexMemorySyncResponse;
+use crate::portable_schema::PortableMemoryConclusion;
+use crate::portable_schema::PortableMemoryContext;
 use crate::portable_schema::PortableMemorySettings;
+use crate::portable_schema::VisibleMemoryMessage;
+use crate::provider::MemoryProvider;
+use crate::provider::PortableMemoryError;
+use crate::provider::ProviderFuture;
 use crate::runtime::PortableMemoryRuntime;
 use crate::selected::SelectedMemoriesBackend;
 
@@ -288,7 +297,16 @@ async fn portable_prompt_contribution_describes_provider_without_local_summary()
     assert_eq!(fragments.len(), 1);
     assert_eq!(fragments[0].slot(), PromptSlot::DeveloperPolicy);
     assert!(fragments[0].text().contains("## Portable Memory"));
-    assert!(fragments[0].text().contains("Portable memory is active."));
+    assert!(
+        fragments[0]
+            .text()
+            .contains("Portable memory backend is selected.")
+    );
+    assert!(
+        fragments[0]
+            .text()
+            .contains("Provider status: not configured.")
+    );
     assert!(fragments[0].text().contains("Profile: personal"));
     assert!(fragments[0].text().contains("Workspace: codex-memory-lab"));
 }
@@ -402,9 +420,19 @@ async fn visible_turn_writeback_skips_secret_like_content() {
     ));
 
     let mut user_item = TurnItem::UserMessage(UserMessageItem::new(&[UserInput::Text {
-        text: "HONCHO_API_KEY=hch-v3-secret-value".to_string(),
+        text: "HONCHO_API_KEY=HCH-V3-SECRET-VALUE".to_string(),
         text_elements: Vec::new(),
     }]));
+    let mut uppercase_openai_secret =
+        TurnItem::UserMessage(UserMessageItem::new(&[UserInput::Text {
+            text: "OPENAI_TOKEN=SK-SECRET-VALUE".to_string(),
+            text_elements: Vec::new(),
+        }]));
+    let mut reasoning_item = TurnItem::Reasoning(ReasoningItem {
+        id: "reasoning-1".to_string(),
+        summary_text: vec!["A visible reasoning summary must not be written.".to_string()],
+        raw_content: vec!["hidden chain of thought".to_string()],
+    });
     let mut assistant_item = TurnItem::AgentMessage(AgentMessageItem {
         id: "assistant-1".to_string(),
         content: vec![AgentMessageContent::Text {
@@ -417,6 +445,17 @@ async fn visible_turn_writeback_skips_secret_like_content() {
     TurnItemContributor::contribute(&extension, &thread_store, &turn_store, &mut user_item)
         .await
         .expect("user item contribution should not fail");
+    TurnItemContributor::contribute(
+        &extension,
+        &thread_store,
+        &turn_store,
+        &mut uppercase_openai_secret,
+    )
+    .await
+    .expect("uppercase secret item contribution should not fail");
+    TurnItemContributor::contribute(&extension, &thread_store, &turn_store, &mut reasoning_item)
+        .await
+        .expect("reasoning item contribution should not fail");
     TurnItemContributor::contribute(&extension, &thread_store, &turn_store, &mut assistant_item)
         .await
         .expect("assistant item contribution should not fail");
@@ -441,6 +480,117 @@ async fn visible_turn_writeback_skips_secret_like_content() {
             }),
         }]
     );
+}
+
+#[tokio::test]
+async fn honcho_add_note_rejects_secret_content_without_filename_error() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let memory_root = tempdir.path().join("memories");
+    let settings = honcho_settings(
+        codex_config::types::MemoryBackendKind::Honcho,
+        "codex-memory-lab",
+    );
+    let backend = SelectedMemoriesBackend::Provider {
+        local: LocalMemoriesBackend::from_memory_root(&memory_root),
+        provider: crate::honcho::provider_for_tests(settings, InMemoryHonchoMemoryClient::new()),
+    };
+
+    let err = crate::backend::MemoriesBackend::add_ad_hoc_note(
+        &backend,
+        crate::backend::AddAdHocMemoryNoteRequest {
+            filename: "2026-06-06T12-00-00-secret-note.md".to_string(),
+            note: "OPENAI_TOKEN=SK-SECRET-VALUE".to_string(),
+        },
+    )
+    .await
+    .expect_err("secret-like portable note should be rejected");
+
+    assert!(err.to_string().contains("content rejected"));
+    assert!(!err.to_string().contains("filename"));
+    assert!(
+        !memory_root
+            .join("extensions/ad_hoc/notes/2026-06-06T12-00-00-secret-note.md")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn honcho_tool_provider_request_failure_falls_back_to_local() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let memory_root = tempdir.path().join("memories");
+    tokio::fs::create_dir_all(&memory_root)
+        .await
+        .expect("create memory root");
+    tokio::fs::write(memory_root.join("MEMORY.md"), "fallback needle\n")
+        .await
+        .expect("write local memory");
+    let backend = SelectedMemoriesBackend::Provider {
+        local: LocalMemoriesBackend::from_memory_root(&memory_root),
+        provider: Arc::new(FailingMemoryProvider),
+    };
+
+    let read = crate::backend::MemoriesBackend::read(
+        &backend,
+        crate::backend::ReadMemoryRequest {
+            path: "MEMORY.md".to_string(),
+            line_offset: 1,
+            max_lines: None,
+            max_tokens: 1024,
+        },
+    )
+    .await
+    .expect("provider request failure should fall back to local read");
+    assert_eq!(read.content, "fallback needle\n");
+
+    let search = crate::backend::MemoriesBackend::search(
+        &backend,
+        crate::backend::SearchMemoriesRequest {
+            queries: vec!["needle".to_string()],
+            match_mode: crate::backend::SearchMatchMode::Any,
+            path: None,
+            cursor: None,
+            context_lines: 0,
+            case_sensitive: false,
+            normalized: false,
+            max_results: 10,
+        },
+    )
+    .await
+    .expect("provider request failure should fall back to local search");
+    assert_eq!(search.matches.len(), 1);
+
+    crate::backend::MemoriesBackend::add_ad_hoc_note(
+        &backend,
+        crate::backend::AddAdHocMemoryNoteRequest {
+            filename: "2026-06-06T12-00-01-fallback-note.md".to_string(),
+            note: "Fallback writes local note when provider is down.".to_string(),
+        },
+    )
+    .await
+    .expect("provider request failure should fall back to local note write");
+    assert_eq!(
+        tokio::fs::read_to_string(
+            memory_root
+                .join("extensions/ad_hoc/notes")
+                .join("2026-06-06T12-00-01-fallback-note.md")
+        )
+        .await
+        .expect("read fallback note"),
+        "Fallback writes local note when provider is down."
+    );
+}
+
+#[test]
+fn honcho_loopback_detection_requires_exact_loopback_host() {
+    assert!(crate::honcho::is_loopback_url("http://localhost:8000/v3"));
+    assert!(crate::honcho::is_loopback_url("http://127.0.0.1:8000/v3"));
+    assert!(crate::honcho::is_loopback_url("http://[::1]:8000/v3"));
+    assert!(!crate::honcho::is_loopback_url(
+        "https://notlocalhost.example/v3"
+    ));
+    assert!(!crate::honcho::is_loopback_url(
+        "https://localhost.example/v3"
+    ));
 }
 
 #[tokio::test]
@@ -955,4 +1105,64 @@ fn honcho_settings(
         sync_policy: codex_config::types::MemorySyncPolicy::Manual,
         cross_profile_policy: codex_config::types::CrossProfilePolicy::DefaultDeny,
     }
+}
+
+#[derive(Clone)]
+struct FailingMemoryProvider;
+
+impl MemoryProvider for FailingMemoryProvider {
+    fn recall(&self, _query: String) -> ProviderFuture<'_, PortableMemoryContext> {
+        provider_unavailable()
+    }
+
+    fn search(
+        &self,
+        _request: crate::backend::SearchMemoriesRequest,
+    ) -> ProviderFuture<'_, crate::backend::SearchMemoriesResponse> {
+        provider_unavailable()
+    }
+
+    fn list(
+        &self,
+        _request: crate::backend::ListMemoriesRequest,
+    ) -> ProviderFuture<'_, crate::backend::ListMemoriesResponse> {
+        provider_unavailable()
+    }
+
+    fn read(
+        &self,
+        _request: crate::backend::ReadMemoryRequest,
+    ) -> ProviderFuture<'_, crate::backend::ReadMemoryResponse> {
+        provider_unavailable()
+    }
+
+    fn add_note(
+        &self,
+        _request: crate::backend::AddAdHocMemoryNoteRequest,
+    ) -> ProviderFuture<'_, crate::backend::AddAdHocMemoryNoteResponse> {
+        provider_unavailable()
+    }
+
+    fn write_visible_turn(&self, _messages: Vec<VisibleMemoryMessage>) -> ProviderFuture<'_, ()> {
+        provider_unavailable()
+    }
+
+    fn conclude(&self, _conclusion: PortableMemoryConclusion) -> ProviderFuture<'_, ()> {
+        provider_unavailable()
+    }
+
+    fn sync_local_files(
+        &self,
+        _request: LocalCodexMemorySyncRequest,
+    ) -> ProviderFuture<'_, LocalCodexMemorySyncResponse> {
+        provider_unavailable()
+    }
+}
+
+fn provider_unavailable<T>() -> ProviderFuture<'static, T> {
+    Box::pin(async {
+        Err(PortableMemoryError::Request(
+            "provider unavailable".to_string(),
+        ))
+    })
 }

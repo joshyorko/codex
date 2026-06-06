@@ -91,8 +91,13 @@ impl PortableMemoryRuntime {
         .await
     }
 
+    pub(crate) fn is_provider_configured(&self) -> bool {
+        self.provider.is_some()
+    }
+
     pub(crate) fn should_sync_local_files_on_startup(&self) -> bool {
-        matches!(self.settings.sync_policy, MemorySyncPolicy::Startup) && self.provider.is_some()
+        matches!(self.settings.sync_policy, MemorySyncPolicy::Startup)
+            && self.is_provider_configured()
     }
 
     pub(crate) fn record_turn_item(

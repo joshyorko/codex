@@ -21,7 +21,10 @@ use crate::provider::PortableMemoryError;
 #[derive(Clone)]
 pub(crate) enum SelectedMemoriesBackend {
     Local(LocalMemoriesBackend),
-    Provider(Arc<dyn MemoryProvider>),
+    Provider {
+        local: LocalMemoriesBackend,
+        provider: Arc<dyn MemoryProvider>,
+    },
     Hybrid {
         local: LocalMemoriesBackend,
         provider: Option<Arc<dyn MemoryProvider>>,
@@ -36,7 +39,10 @@ impl SelectedMemoriesBackend {
         match settings.backend {
             MemoryBackendKind::Local => Self::Local(local),
             MemoryBackendKind::Honcho => portable_provider_for_settings(&settings)
-                .map(Self::Provider)
+                .map(|provider| Self::Provider {
+                    local: local.clone(),
+                    provider,
+                })
                 .unwrap_or_else(|| Self::Local(local)),
             MemoryBackendKind::Hybrid => Self::Hybrid {
                 local,
@@ -53,10 +59,13 @@ impl MemoriesBackend for SelectedMemoriesBackend {
     ) -> Result<AddAdHocMemoryNoteResponse, MemoriesBackendError> {
         match self {
             Self::Local(local) => local.add_ad_hoc_note(request).await,
-            Self::Provider(provider) => provider
-                .add_note(request)
-                .await
-                .map_err(provider_error_to_backend_error),
+            Self::Provider { local, provider } => match provider.add_note(request.clone()).await {
+                Ok(response) => Ok(response),
+                Err(err) if provider_error_should_fallback(&err) => {
+                    local.add_ad_hoc_note(request).await
+                }
+                Err(err) => Err(provider_error_to_backend_error(err)),
+            },
             Self::Hybrid { local, provider } => {
                 let response = local.add_ad_hoc_note(request.clone()).await?;
                 if let Some(provider) = provider {
@@ -73,10 +82,11 @@ impl MemoriesBackend for SelectedMemoriesBackend {
     ) -> Result<ListMemoriesResponse, MemoriesBackendError> {
         match self {
             Self::Local(local) => local.list(request).await,
-            Self::Provider(provider) => provider
-                .list(request)
-                .await
-                .map_err(provider_error_to_backend_error),
+            Self::Provider { local, provider } => match provider.list(request.clone()).await {
+                Ok(response) => Ok(response),
+                Err(err) if provider_error_should_fallback(&err) => local.list(request).await,
+                Err(err) => Err(provider_error_to_backend_error(err)),
+            },
             Self::Hybrid { local, provider } => match provider {
                 Some(provider) => match provider.list(request.clone()).await {
                     Ok(response) => Ok(response),
@@ -93,10 +103,11 @@ impl MemoriesBackend for SelectedMemoriesBackend {
     ) -> Result<ReadMemoryResponse, MemoriesBackendError> {
         match self {
             Self::Local(local) => local.read(request).await,
-            Self::Provider(provider) => provider
-                .read(request)
-                .await
-                .map_err(provider_error_to_backend_error),
+            Self::Provider { local, provider } => match provider.read(request.clone()).await {
+                Ok(response) => Ok(response),
+                Err(err) if provider_error_should_fallback(&err) => local.read(request).await,
+                Err(err) => Err(provider_error_to_backend_error(err)),
+            },
             Self::Hybrid { local, provider } => match provider {
                 Some(provider) => match provider.read(request.clone()).await {
                     Ok(response) => Ok(response),
@@ -113,10 +124,11 @@ impl MemoriesBackend for SelectedMemoriesBackend {
     ) -> Result<SearchMemoriesResponse, MemoriesBackendError> {
         match self {
             Self::Local(local) => local.search(request).await,
-            Self::Provider(provider) => provider
-                .search(request)
-                .await
-                .map_err(provider_error_to_backend_error),
+            Self::Provider { local, provider } => match provider.search(request.clone()).await {
+                Ok(response) => Ok(response),
+                Err(err) if provider_error_should_fallback(&err) => local.search(request).await,
+                Err(err) => Err(provider_error_to_backend_error(err)),
+            },
             Self::Hybrid { local, provider } => match provider {
                 Some(provider) => match provider.search(request.clone()).await {
                     Ok(response) => Ok(response),
@@ -148,5 +160,15 @@ fn provider_error_to_backend_error(err: PortableMemoryError) -> MemoriesBackendE
         PortableMemoryError::Request(message) => {
             MemoriesBackendError::Io(std::io::Error::other(message))
         }
+        PortableMemoryError::RejectedContent(message) => {
+            MemoriesBackendError::Io(std::io::Error::other(message))
+        }
     }
+}
+
+fn provider_error_should_fallback(err: &PortableMemoryError) -> bool {
+    matches!(
+        err,
+        PortableMemoryError::NotConfigured | PortableMemoryError::Request(_)
+    )
 }
