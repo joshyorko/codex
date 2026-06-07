@@ -1,0 +1,134 @@
+name: tap-release-linux
+
+on:
+  push:
+    branches:
+      - tap-release
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tap-release-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TARGET: x86_64-unknown-linux-gnu
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  build:
+    if: github.repository == 'joshyorko/codex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Resolve release metadata
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          committed_at="$(git show -s --format=%cI HEAD)"
+          timestamp="$(date -u -d "$committed_at" +%Y%m%d%H%M%S)"
+          version="release.${timestamp}.${commit:0:12}"
+          {
+            echo "version=${version}"
+            echo "release_tag=codex-release-${version}"
+            echo "asset_name=codex-release-${version}.tar.gz"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            binutils \
+            build-essential \
+            ca-certificates \
+            clang \
+            cmake \
+            curl \
+            git \
+            libasound2-dev \
+            libcap-dev \
+            pkg-config \
+            zstd
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Restore Cargo cache
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            codex-rs/target
+          key: ${{ runner.os }}-${{ env.TARGET }}-tap-release-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ env.TARGET }}-tap-release-
+
+      - name: Build Linux binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd codex-rs
+          cargo build --locked --release --target "$TARGET" --bin codex --bin bwrap
+
+      - name: Build Homebrew archive
+        shell: bash
+        env:
+          ASSET_NAME: ${{ steps.version.outputs.asset_name }}
+        run: |
+          set -euo pipefail
+          archive_path="${RUNNER_TEMP}/${ASSET_NAME}"
+          python3 scripts/build_codex_package.py \
+            --target "$TARGET" \
+            --variant codex \
+            --entrypoint-bin "codex-rs/target/${TARGET}/release/codex" \
+            --bwrap-bin "codex-rs/target/${TARGET}/release/bwrap" \
+            --cargo-profile release \
+            --package-dir "${RUNNER_TEMP}/codex-package" \
+            --archive-output "$archive_path" \
+            --force
+          tar -tzf "$archive_path" | sort
+          sha256sum "$archive_path"
+
+      - name: Publish fork tap release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          tag_name: ${{ steps.version.outputs.release_tag }}
+          name: ${{ steps.version.outputs.release_tag }}
+          body: |
+            Linux Homebrew tap archive for ${{ github.repository }}@${{ github.sha }}.
+          files: ${{ runner.temp }}/${{ steps.version.outputs.asset_name }}
+          overwrite_files: true
+          make_latest: false
+          prerelease: true
+
+      - name: Dispatch homebrew-tools tap update
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TOOLS_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "HOMEBREW_TOOLS_PAT is required to dispatch joshyorko/homebrew-tools." >&2
+            exit 1
+          fi
+
+          payload='{"ref":"main","inputs":{"slot_id":"codex-release-daily"}}'
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            repos/joshyorko/homebrew-tools/actions/workflows/tap-auto-update.yml/dispatches \
+            --input - <<<"$payload"
