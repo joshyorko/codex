@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  TARGET: x86_64-unknown-linux-gnu
+  TARGET: x86_64-unknown-linux-musl
   CARGO_BUILD_JOBS: "1"
   CARGO_INCREMENTAL: "0"
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -66,12 +66,46 @@ jobs:
         with:
           targets: ${{ env.TARGET }}
 
+      - name: Use hermetic Cargo home
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+          : > "${cargo_home}/config.toml"
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install musl build tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          TARGET: ${{ env.TARGET }}
+          APT_UPDATE_ARGS: -o Acquire::Retries=3
+          APT_INSTALL_ARGS: --no-install-recommends
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Disable aws-lc jitter entropy
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET}"
+          target_no_jitter="${target_no_jitter//-/_}"
+          echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
+
       - name: Restore Cargo cache
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: |
-            ~/.cargo/git
-            ~/.cargo/registry
+            .cargo-home/git
+            .cargo-home/registry
             codex-rs/target
           key: ${{ runner.os }}-${{ env.TARGET }}-tap-release-${{ hashFiles('codex-rs/Cargo.lock') }}
           restore-keys: |
