@@ -74,3 +74,31 @@ manifest at `scripts/codex_package/codex-zsh` when the selected target has a
 matching prebuilt artifact. Downloaded archives are cached under
 `$TMPDIR/codex-package/<target>-zsh` and installed at
 `codex-resources/zsh/bin/zsh`.
+
+## Local tap release builds
+
+Use `just local-tap-release` from the repository root to build the Linux
+Homebrew tap archive locally. The wrapper builds in a local Ubuntu container by
+default, keeps repeat-build caches under `.codex-local-build/`, and writes clean
+outputs under `dist/local-tap-release/`.
+
+The default output archive is named like the tap release workflow:
+
+```text
+dist/local-tap-release/codex-release-release.<commit_timestamp>.<sha12>.tar.gz
+```
+
+Pass `--publish` to create or update the matching prerelease asset in
+`joshyorko/codex`, and `--dispatch-homebrew-tools` to trigger the downstream
+`joshyorko/homebrew-tools` tap updater after the local build. Publishing and
+dispatching require the current commit to match `origin/tap-release` unless
+`--allow-non-tap-head` is provided.
+
+Useful options:
+
+```bash
+just local-tap-release
+just local-tap-release --rebuild-image
+just local-tap-release --clean-cache
+just local-tap-release --publish --dispatch-homebrew-tools
+```

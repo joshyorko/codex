@@ -136,6 +136,10 @@ bazel-argument-comment-lint:
 build-for-release:
     bazel build //codex-rs/cli:release_binaries
 
+[no-cd]
+local-tap-release *args:
+    {{ justfile_directory() }}/scripts/build-local-tap-release.sh "$@"
+
 # Run the MCP server
 mcp-server-run *args:
     cargo run -p codex-mcp-server -- {args}
