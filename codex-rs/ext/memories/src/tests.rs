@@ -708,6 +708,87 @@ async fn import_local_preview_reports_bridge_without_provider_write() {
 }
 
 #[tokio::test]
+async fn import_local_preview_accepts_large_files_by_default() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let memory_root = tempdir.path().join("memories");
+    tokio::fs::create_dir_all(&memory_root)
+        .await
+        .expect("create memories root");
+    let large_memory = "Josh prefers repo-native commands.\n".repeat(4096);
+    tokio::fs::write(memory_root.join("MEMORY.md"), large_memory.as_bytes())
+        .await
+        .expect("write large local memory");
+
+    let settings = honcho_settings(
+        codex_config::types::MemoryBackendKind::Provider,
+        "codex-memory-lab",
+    );
+    let report = crate::import_local::sync_local_codex_memory_with_provider(
+        &tempdir.path().abs(),
+        &settings,
+        crate::import_local::ImportLocalCodexMemoryMode::Preview,
+        None,
+    )
+    .await
+    .expect("preview local import");
+
+    assert_eq!(report.accepted_files, 1);
+    assert_eq!(report.rejected_files, 0);
+    assert_eq!(report.files[0].path, "MEMORY.md");
+    assert_eq!(report.files[0].bytes, large_memory.len() as u64);
+    assert_eq!(
+        report.files[0].status,
+        crate::import_local::ImportLocalCodexMemoryFileStatus::Accepted
+    );
+}
+
+#[tokio::test]
+async fn import_local_preview_redacts_blocked_lines_instead_of_rejecting_file() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let memory_root = tempdir.path().join("memories");
+    tokio::fs::create_dir_all(&memory_root)
+        .await
+        .expect("create memories root");
+    tokio::fs::write(
+        memory_root.join("MEMORY.md"),
+        "Josh prefers repo-native commands.\npassword=do-not-import\nKeep local imports useful.",
+    )
+    .await
+    .expect("write mixed local memory");
+
+    let settings = honcho_settings(
+        codex_config::types::MemoryBackendKind::Provider,
+        "codex-memory-lab",
+    );
+    let report = crate::import_local::sync_local_codex_memory_with_provider(
+        &tempdir.path().abs(),
+        &settings,
+        crate::import_local::ImportLocalCodexMemoryMode::Preview,
+        None,
+    )
+    .await
+    .expect("preview local import");
+
+    assert_eq!(report.accepted_files, 1);
+    assert_eq!(report.rejected_files, 0);
+    assert_eq!(report.files[0].path, "MEMORY.md");
+    assert_eq!(
+        report.files[0].status,
+        crate::import_local::ImportLocalCodexMemoryFileStatus::Accepted
+    );
+}
+
+#[test]
+fn local_import_sanitizer_drops_blocked_lines() {
+    let content = crate::policy::sanitize_local_import_memory_content(
+        "Keep this.\npassword=do-not-import\nKeep this too.",
+    )
+    .expect("mixed local memory should sanitize");
+
+    assert_eq!(content, "Keep this.\nKeep this too.");
+}
+
+#[tokio::test]
 async fn startup_sync_policy_imports_safe_local_memory_files() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let memory_root = tempdir.path().join("memories");

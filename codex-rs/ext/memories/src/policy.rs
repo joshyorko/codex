@@ -13,6 +13,25 @@ pub(crate) fn sanitize_visible_memory_content(content: &str) -> Option<String> {
     Some(truncate_chars(content, MAX_WRITEBACK_CHARS))
 }
 
+pub(crate) fn sanitize_local_import_memory_content(content: &str) -> Option<String> {
+    let content = content.trim();
+    if content.is_empty() {
+        return None;
+    }
+
+    let sanitized = content
+        .lines()
+        .filter(|line| !contains_blocked_memory_content(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    if sanitized.is_empty() {
+        return None;
+    }
+    Some(truncate_chars(&sanitized, MAX_WRITEBACK_CHARS))
+}
+
 fn contains_blocked_memory_content(content: &str) -> bool {
     let lower = content.to_ascii_lowercase();
     lower.contains("api_key=")

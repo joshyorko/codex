@@ -13,7 +13,7 @@ use sha2::Digest;
 use sha2::Sha256;
 
 use crate::policy::portable_metadata;
-use crate::policy::sanitize_visible_memory_content;
+use crate::policy::sanitize_local_import_memory_content;
 use crate::portable_schema::LOCAL_CODEX_MEMORY_SYNC_ENDPOINT;
 use crate::portable_schema::LocalCodexMemorySyncMode;
 use crate::portable_schema::LocalCodexMemorySyncRequest;
@@ -23,7 +23,6 @@ use crate::provider::MemoryProvider;
 use crate::selected::portable_provider_for_settings;
 
 const MAX_IMPORT_FILES: usize = 128;
-const MAX_IMPORT_FILE_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportLocalCodexMemoryMode {
@@ -217,17 +216,8 @@ async fn collect_local_codex_memory(
                 ));
                 continue;
             }
-            if metadata.len() > MAX_IMPORT_FILE_BYTES {
-                report_files.push(rejected_file(
-                    relative_path,
-                    metadata.len(),
-                    "file exceeds local import size limit",
-                ));
-                continue;
-            }
-
             let raw_content = tokio::fs::read_to_string(&path).await?;
-            let Some(content) = sanitize_visible_memory_content(&raw_content) else {
+            let Some(content) = sanitize_local_import_memory_content(&raw_content) else {
                 report_files.push(rejected_file(
                     relative_path,
                     metadata.len(),
