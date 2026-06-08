@@ -111,6 +111,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ env.TARGET }}-tap-release-
 
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ env.TARGET }}
+
       - name: Build Linux binaries
         shell: bash
         run: |
