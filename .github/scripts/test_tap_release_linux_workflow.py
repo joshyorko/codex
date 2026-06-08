@@ -24,7 +24,10 @@ class TapReleaseLinuxWorkflowTest(unittest.TestCase):
     def test_workflow_builds_only_the_linux_homebrew_artifact(self) -> None:
         workflow = self.workflow()
 
-        self.assertIn("TARGET: x86_64-unknown-linux-gnu", workflow)
+        self.assertIn("TARGET: x86_64-unknown-linux-musl", workflow)
+        self.assertIn("Install musl build tools", workflow)
+        self.assertIn("install-musl-build-tools.sh", workflow)
+        self.assertIn("AWS_LC_SYS_NO_JITTER_ENTROPY=1", workflow)
         self.assertIn("CARGO_BUILD_JOBS: \"1\"", workflow)
         self.assertIn("--bin codex --bin bwrap", workflow)
         self.assertIn("codex-release-${version}.tar.gz", workflow)
@@ -41,6 +44,7 @@ class TapReleaseLinuxWorkflowTest(unittest.TestCase):
 
         self.assertIn("actions/cache", workflow)
         self.assertIn("codex-rs/target", workflow)
+        self.assertIn(".cargo-home/registry", workflow)
         self.assertIn("HOMEBREW_TOOLS_PAT", workflow)
         self.assertIn(
             "repos/joshyorko/homebrew-tools/actions/workflows/tap-auto-update.yml/dispatches",
