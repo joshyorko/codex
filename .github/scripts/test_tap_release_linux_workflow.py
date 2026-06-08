@@ -28,6 +28,8 @@ class TapReleaseLinuxWorkflowTest(unittest.TestCase):
         self.assertIn("Install musl build tools", workflow)
         self.assertIn("install-musl-build-tools.sh", workflow)
         self.assertIn("AWS_LC_SYS_NO_JITTER_ENTROPY=1", workflow)
+        self.assertIn("Configure rusty_v8 artifact overrides", workflow)
+        self.assertIn("./.github/actions/setup-rusty-v8", workflow)
         self.assertIn("CARGO_BUILD_JOBS: \"1\"", workflow)
         self.assertIn("--bin codex --bin bwrap", workflow)
         self.assertIn("codex-release-${version}.tar.gz", workflow)
