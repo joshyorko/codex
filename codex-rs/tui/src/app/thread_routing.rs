@@ -896,6 +896,14 @@ impl App {
         &mut self,
         notification: &ServerNotification,
     ) {
+        if let Some(activity) =
+            sub_agent_activity_item(notification).and_then(sub_agent_activity_display)
+        {
+            self.agent_navigation.record_sub_agent_activity(activity);
+            self.sync_active_agent_label();
+            return;
+        }
+
         let Some(receiver_thread_ids) = collab_receiver_thread_ids(notification) else {
             return;
         };
@@ -1261,6 +1269,7 @@ impl App {
         snapshot: ThreadEventSnapshot,
         resume_restored_queue: bool,
     ) {
+        self.refresh_mcp_startup_expected_servers_from_config();
         let should_buffer_replay = self.terminal_resize_reflow_enabled()
             && (!snapshot.turns.is_empty() || !snapshot.events.is_empty());
         if should_buffer_replay {
