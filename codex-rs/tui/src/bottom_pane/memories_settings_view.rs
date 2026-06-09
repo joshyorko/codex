@@ -1,3 +1,6 @@
+use codex_config::types::MemoriesConfig;
+use codex_config::types::MemoryBackendKind;
+use codex_config::types::MemoryProviderKind;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
@@ -40,6 +43,13 @@ enum MemoriesSetting {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MemoriesAction {
+    Status,
+    SetupCodexMemoryd,
+    SetupHoncho,
+    SetupHybrid,
+    DisableProvider,
+    ImportPreview,
+    ImportApply,
     Reset,
 }
 
@@ -59,6 +69,7 @@ enum MemoriesMenuItem {
 
 pub(crate) struct MemoriesSettingsView {
     items: Vec<MemoriesMenuItem>,
+    memories: MemoriesConfig,
     state: ScrollState,
     reset_confirmation: Option<ScrollState>,
     complete: bool,
@@ -69,11 +80,12 @@ pub(crate) struct MemoriesSettingsView {
 
 impl MemoriesSettingsView {
     pub(crate) fn new(
-        use_memories: bool,
-        generate_memories: bool,
+        memories: MemoriesConfig,
         app_event_tx: AppEventSender,
         keymap: ListKeymap,
     ) -> Self {
+        let use_memories = memories.use_memories;
+        let generate_memories = memories.generate_memories;
         let mut view = Self {
             items: vec![
                 MemoriesMenuItem::Setting {
@@ -89,11 +101,47 @@ impl MemoriesSettingsView {
                     enabled: generate_memories,
                 },
                 MemoriesMenuItem::Action {
+                    action: MemoriesAction::Status,
+                    name: "Status and health check",
+                    description: "Check selected backend/provider without blocking startup.",
+                },
+                MemoriesMenuItem::Action {
+                    action: MemoriesAction::SetupCodexMemoryd,
+                    name: "Setup codex-memoryd",
+                    description: "Use provider mode with http://127.0.0.1:8787 by default.",
+                },
+                MemoriesMenuItem::Action {
+                    action: MemoriesAction::SetupHoncho,
+                    name: "Setup Honcho",
+                    description: "Use provider mode with HONCHO_API_KEY env var by default.",
+                },
+                MemoriesMenuItem::Action {
+                    action: MemoriesAction::SetupHybrid,
+                    name: "Use hybrid provider mode",
+                    description: "Keep local cache/debug files and sync durable memory to provider.",
+                },
+                MemoriesMenuItem::Action {
+                    action: MemoriesAction::DisableProvider,
+                    name: "Disable provider memory",
+                    description: "Switch backend to local while preserving provider settings.",
+                },
+                MemoriesMenuItem::Action {
+                    action: MemoriesAction::ImportPreview,
+                    name: "Preview local import",
+                    description: "Inspect local memory sync payload without provider writes.",
+                },
+                MemoriesMenuItem::Action {
+                    action: MemoriesAction::ImportApply,
+                    name: "Apply local import",
+                    description: "Sync accepted local memory files to configured provider.",
+                },
+                MemoriesMenuItem::Action {
                     action: MemoriesAction::Reset,
                     name: "Reset all memories",
                     description: "Clear local memory files and summaries. Existing threads stay intact.",
                 },
             ],
+            memories,
             state: ScrollState::new(),
             reset_confirmation: None,
             complete: false,
@@ -116,8 +164,31 @@ impl MemoriesSettingsView {
         let mut header = ColumnRenderable::new();
         header.push(Line::from("Memories".bold()));
         header.push(Line::from(
-            "Choose how Codex uses and creates memories. Changes are saved to config.toml".dim(),
+            "Choose local memory behavior and portable provider setup. Changes are saved to config.toml".dim(),
         ));
+        header.push(Line::from(
+            format!(
+                "Backend: {}   Provider: {}   Profile: {}   Workspace: {}",
+                self.memories.backend.as_str(),
+                self.memories.provider.as_str(),
+                self.memories.profile.as_str(),
+                self.memories.workspace
+            )
+            .dim(),
+        ));
+        let connection = match self.memories.provider {
+            MemoryProviderKind::CodexMemoryd => self
+                .memories
+                .provider_url
+                .as_deref()
+                .unwrap_or("http://127.0.0.1:8787"),
+            MemoryProviderKind::Honcho => self
+                .memories
+                .honcho_api_key_env
+                .as_deref()
+                .unwrap_or("HONCHO_API_KEY"),
+        };
+        header.push(Line::from(format!("Connection: {connection}").dim()));
         header
     }
 
@@ -283,6 +354,38 @@ impl MemoriesSettingsView {
         self.reset_confirmation = Some(state);
     }
 
+    fn provider_setup(
+        &self,
+        provider: MemoryProviderKind,
+        backend: MemoryBackendKind,
+    ) -> crate::config_update::PortableMemorySetup {
+        let provider_url = match provider {
+            MemoryProviderKind::CodexMemoryd => Some(
+                self.memories
+                    .provider_url
+                    .clone()
+                    .unwrap_or_else(|| "http://127.0.0.1:8787".to_string()),
+            ),
+            MemoryProviderKind::Honcho => None,
+        };
+        let honcho_api_key_env = matches!(provider, MemoryProviderKind::Honcho).then(|| {
+            self.memories
+                .honcho_api_key_env
+                .clone()
+                .unwrap_or_else(|| "HONCHO_API_KEY".to_string())
+        });
+        crate::config_update::PortableMemorySetup {
+            backend,
+            provider,
+            profile: self.memories.profile,
+            workspace: self.memories.workspace.clone(),
+            user_peer: self.memories.user_peer.clone(),
+            assistant_peer: self.memories.assistant_peer.clone(),
+            provider_url,
+            honcho_api_key_env,
+        }
+    }
+
     fn close_reset_confirmation(&mut self) {
         self.reset_confirmation = None;
         self.state.selected_idx = self.items.len().checked_sub(1);
@@ -346,6 +449,67 @@ impl MemoriesSettingsView {
                 action: MemoriesAction::Reset,
                 ..
             }) => self.open_reset_confirmation(),
+            Some(MemoriesMenuItem::Action {
+                action: MemoriesAction::Status,
+                ..
+            }) => {
+                self.app_event_tx.send(AppEvent::ShowMemoryStatus);
+                self.complete = true;
+            }
+            Some(MemoriesMenuItem::Action {
+                action: MemoriesAction::SetupCodexMemoryd,
+                ..
+            }) => {
+                self.app_event_tx
+                    .send(AppEvent::SetupPortableMemory(self.provider_setup(
+                        MemoryProviderKind::CodexMemoryd,
+                        MemoryBackendKind::Provider,
+                    )));
+                self.complete = true;
+            }
+            Some(MemoriesMenuItem::Action {
+                action: MemoriesAction::SetupHoncho,
+                ..
+            }) => {
+                self.app_event_tx.send(AppEvent::SetupPortableMemory(
+                    self.provider_setup(MemoryProviderKind::Honcho, MemoryBackendKind::Provider),
+                ));
+                self.complete = true;
+            }
+            Some(MemoriesMenuItem::Action {
+                action: MemoriesAction::SetupHybrid,
+                ..
+            }) => {
+                self.app_event_tx.send(AppEvent::SetupPortableMemory(
+                    self.provider_setup(self.memories.provider, MemoryBackendKind::Hybrid),
+                ));
+                self.complete = true;
+            }
+            Some(MemoriesMenuItem::Action {
+                action: MemoriesAction::DisableProvider,
+                ..
+            }) => {
+                self.app_event_tx.send(AppEvent::DisablePortableMemory);
+                self.complete = true;
+            }
+            Some(MemoriesMenuItem::Action {
+                action: MemoriesAction::ImportPreview,
+                ..
+            }) => {
+                self.app_event_tx.send(AppEvent::ImportLocalMemory {
+                    mode: crate::app_event::MemoryImportMode::Preview,
+                });
+                self.complete = true;
+            }
+            Some(MemoriesMenuItem::Action {
+                action: MemoriesAction::ImportApply,
+                ..
+            }) => {
+                self.app_event_tx.send(AppEvent::ImportLocalMemory {
+                    mode: crate::app_event::MemoryImportMode::Apply,
+                });
+                self.complete = true;
+            }
             _ => {
                 self.app_event_tx.send(AppEvent::UpdateMemorySettings {
                     use_memories: self.current_setting(MemoriesSetting::Use),

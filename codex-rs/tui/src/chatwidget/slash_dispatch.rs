@@ -7,13 +7,18 @@
 
 use super::goal_validation::GoalObjectiveValidationSource;
 use super::*;
+use crate::app_event::MemoryImportMode;
 use crate::app_event::ThreadGoalSetMode;
 use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::slash_commands::BuiltinCommandFlags;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use crate::bottom_pane::slash_commands::SlashCommandItem;
 use crate::bottom_pane::slash_commands::find_slash_command;
+use crate::config_update::PortableMemorySetup;
 use crate::goal_display::GOAL_USAGE;
+use codex_config::types::MemoryBackendKind;
+use codex_config::types::MemoryProfile;
+use codex_config::types::MemoryProviderKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlashCommandDispatchSource {
@@ -35,6 +40,64 @@ const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
     "Press Ctrl+C to return to the main thread first.";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
+const MEMORY_USAGE: &str = "Usage: /memory [status|disable|setup <honcho|codex-memoryd> [--backend provider|hybrid] [--provider-url URL] [--profile personal|work|oss|homelab] [--workspace ID] [--honcho-api-key-env ENV]|import-local <preview|apply>]";
+
+fn normalized_memory_arg(raw: &str) -> String {
+    raw.trim().replace('-', "_").to_ascii_lowercase()
+}
+
+fn parse_memory_backend_kind(raw: &str) -> Result<MemoryBackendKind, String> {
+    match normalized_memory_arg(raw).as_str() {
+        "local" => Ok(MemoryBackendKind::Local),
+        "provider" => Ok(MemoryBackendKind::Provider),
+        "hybrid" => Ok(MemoryBackendKind::Hybrid),
+        _ => Err("expected memory backend local, provider, or hybrid".to_string()),
+    }
+}
+
+fn parse_memory_provider_kind(raw: &str) -> Result<MemoryProviderKind, String> {
+    match normalized_memory_arg(raw).as_str() {
+        "honcho" => Ok(MemoryProviderKind::Honcho),
+        "codex_memoryd" => Ok(MemoryProviderKind::CodexMemoryd),
+        _ => Err("expected memory provider honcho or codex-memoryd".to_string()),
+    }
+}
+
+fn parse_memory_profile(raw: &str) -> Result<MemoryProfile, String> {
+    match normalized_memory_arg(raw).as_str() {
+        "personal" => Ok(MemoryProfile::Personal),
+        "work" => Ok(MemoryProfile::Work),
+        "oss" => Ok(MemoryProfile::Oss),
+        "homelab" => Ok(MemoryProfile::Homelab),
+        _ => Err("expected memory profile personal, work, oss, or homelab".to_string()),
+    }
+}
+
+fn non_empty_memory_arg(raw: &str, option: &str) -> Result<String, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        Err(format!("{option} must not be empty"))
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn validate_env_var_name(name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err("environment variable name must not be empty".to_string());
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return Err("environment variable name must start with a letter or underscore".to_string());
+    }
+    if chars.any(|ch| !(ch == '_' || ch.is_ascii_alphanumeric())) {
+        return Err(
+            "environment variable name must contain only ASCII letters, numbers, and underscores"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
 
 impl ChatWidget {
     /// Dispatch a bare slash command and record its staged local-history entry.
@@ -656,6 +719,9 @@ impl ChatWidget {
                 }
                 _ => self.add_error_message(RAW_USAGE.to_string()),
             },
+            SlashCommand::Memories => {
+                self.handle_memory_command_args(trimmed);
+            }
             SlashCommand::Rename if !trimmed.is_empty() => {
                 if !self.ensure_thread_rename_allowed() {
                     return;
@@ -835,6 +901,115 @@ impl ChatWidget {
         if source == SlashCommandDispatchSource::Live && cmd != SlashCommand::Goal {
             self.bottom_pane.drain_pending_submission_state();
         }
+    }
+
+    fn handle_memory_command_args(&mut self, trimmed: &str) {
+        if !self.config.features.enabled(Feature::MemoryTool) {
+            self.open_memories_enable_prompt();
+            return;
+        }
+
+        let args = trimmed.split_whitespace().collect::<Vec<_>>();
+        let Some(command) = args.first().copied() else {
+            self.open_memories_popup();
+            return;
+        };
+
+        match normalized_memory_arg(command).as_str() {
+            "status" => self.app_event_tx.send(AppEvent::ShowMemoryStatus),
+            "disable" => self.app_event_tx.send(AppEvent::DisablePortableMemory),
+            "help" => self.add_info_message(MEMORY_USAGE.to_string(), /*hint*/ None),
+            "setup" => match self.parse_memory_setup_args(&args[1..]) {
+                Ok(setup) => self.app_event_tx.send(AppEvent::SetupPortableMemory(setup)),
+                Err(err) => self.add_error_message(format!("{err}\n{MEMORY_USAGE}")),
+            },
+            "import_local" => match args.get(1).map(|arg| normalized_memory_arg(arg)) {
+                Some(mode) if mode == "preview" => {
+                    self.app_event_tx.send(AppEvent::ImportLocalMemory {
+                        mode: MemoryImportMode::Preview,
+                    });
+                }
+                Some(mode) if mode == "apply" => {
+                    self.app_event_tx.send(AppEvent::ImportLocalMemory {
+                        mode: MemoryImportMode::Apply,
+                    });
+                }
+                _ => self
+                    .add_error_message("Usage: /memory import-local <preview|apply>".to_string()),
+            },
+            _ => self.add_error_message(MEMORY_USAGE.to_string()),
+        }
+    }
+
+    fn parse_memory_setup_args(&self, args: &[&str]) -> Result<PortableMemorySetup, String> {
+        let Some(provider_raw) = args.first().copied() else {
+            return Err("missing memory provider".to_string());
+        };
+        let provider = parse_memory_provider_kind(provider_raw)?;
+        let mut backend = MemoryBackendKind::Provider;
+        let mut profile = self.config.memories.profile;
+        let mut workspace = self.config.memories.workspace.clone();
+        let mut provider_url = None;
+        let mut honcho_api_key_env = self.config.memories.honcho_api_key_env.clone();
+        let mut user_peer = self.config.memories.user_peer.clone();
+        let mut assistant_peer = self.config.memories.assistant_peer.clone();
+
+        let mut idx = 1;
+        while idx < args.len() {
+            let key = args[idx];
+            let Some(value) = args.get(idx + 1).copied() else {
+                return Err(format!("missing value for {key}"));
+            };
+            match key {
+                "--backend" => backend = parse_memory_backend_kind(value)?,
+                "--provider-url" => provider_url = Some(non_empty_memory_arg(value, key)?),
+                "--profile" => profile = parse_memory_profile(value)?,
+                "--workspace" => workspace = non_empty_memory_arg(value, key)?,
+                "--honcho-api-key-env" => {
+                    let env_var = non_empty_memory_arg(value, key)?;
+                    validate_env_var_name(&env_var)?;
+                    honcho_api_key_env = Some(env_var);
+                }
+                "--user-peer" => user_peer = non_empty_memory_arg(value, key)?,
+                "--assistant-peer" => assistant_peer = non_empty_memory_arg(value, key)?,
+                _ => return Err(format!("unknown memory setup option {key}")),
+            }
+            idx += 2;
+        }
+
+        let provider_url = match provider {
+            MemoryProviderKind::CodexMemoryd => provider_url
+                .or_else(|| {
+                    matches!(
+                        self.config.memories.provider,
+                        MemoryProviderKind::CodexMemoryd
+                    )
+                    .then(|| self.config.memories.provider_url.clone())
+                    .flatten()
+                })
+                .or_else(|| Some("http://127.0.0.1:8787".to_string())),
+            MemoryProviderKind::Honcho => provider_url.or_else(|| {
+                matches!(self.config.memories.provider, MemoryProviderKind::Honcho)
+                    .then(|| self.config.memories.provider_url.clone())
+                    .flatten()
+            }),
+        };
+        if matches!(provider, MemoryProviderKind::Honcho) && honcho_api_key_env.is_none() {
+            honcho_api_key_env = Some("HONCHO_API_KEY".to_string());
+        }
+
+        Ok(PortableMemorySetup {
+            backend,
+            provider,
+            profile,
+            workspace,
+            user_peer,
+            assistant_peer,
+            provider_url,
+            honcho_api_key_env: matches!(provider, MemoryProviderKind::Honcho)
+                .then_some(honcho_api_key_env)
+                .flatten(),
+        })
     }
 
     pub(super) fn submit_queued_slash_prompt(&mut self, user_message: UserMessage) -> QueueDrain {

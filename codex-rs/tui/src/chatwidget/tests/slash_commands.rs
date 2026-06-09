@@ -1,5 +1,9 @@
 use super::*;
+use crate::app_event::MemoryImportMode;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
+use codex_config::types::MemoryBackendKind;
+use codex_config::types::MemoryProfile;
+use codex_config::types::MemoryProviderKind;
 use pretty_assertions::assert_eq;
 use serial_test::serial;
 
@@ -1851,6 +1855,53 @@ async fn slash_memories_opens_memory_menu() {
     assert!(render_bottom_popup(&chat, /*width*/ 80).contains("Use memories"));
     assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
     assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
+async fn slash_memory_alias_status_and_setup_emit_memory_events() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::MemoryTool, /*enabled*/ true);
+
+    chat.dispatch_command_with_args(SlashCommand::Memories, "status".to_string(), Vec::new());
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ShowMemoryStatus));
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Memories,
+        "setup codex-memoryd --backend hybrid --provider-url http://127.0.0.1:8787 --profile oss --workspace codex-memory-lab".to_string(),
+        Vec::new(),
+    );
+
+    match rx.try_recv() {
+        Ok(AppEvent::SetupPortableMemory(setup)) => {
+            assert_eq!(setup.backend, MemoryBackendKind::Hybrid);
+            assert_eq!(setup.provider, MemoryProviderKind::CodexMemoryd);
+            assert_eq!(setup.profile, MemoryProfile::Oss);
+            assert_eq!(setup.workspace, "codex-memory-lab");
+            assert_eq!(setup.provider_url.as_deref(), Some("http://127.0.0.1:8787"));
+        }
+        other => panic!("expected portable memory setup event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn slash_memory_import_and_disable_emit_memory_events() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_feature_enabled(Feature::MemoryTool, /*enabled*/ true);
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Memories,
+        "import-local preview".to_string(),
+        Vec::new(),
+    );
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::ImportLocalMemory {
+            mode: MemoryImportMode::Preview,
+        })
+    );
+
+    chat.dispatch_command_with_args(SlashCommand::Memories, "disable".to_string(), Vec::new());
+    assert_matches!(rx.try_recv(), Ok(AppEvent::DisablePortableMemory));
 }
 
 #[tokio::test]

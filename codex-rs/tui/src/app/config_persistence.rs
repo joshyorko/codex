@@ -5,6 +5,17 @@
 //! loop.
 
 use super::*;
+use crate::app_event::MemoryImportMode;
+use crate::config_update::PortableMemorySetup;
+use codex_config::types::LocalImportPolicy;
+use codex_config::types::MemoriesConfig;
+use codex_config::types::MemoryProviderKind;
+use codex_config::types::MemoryWritePolicy;
+use codex_memories_extension::import_local::ImportLocalCodexMemoryMode;
+use codex_memories_extension::import_local::ImportLocalCodexMemoryReport;
+use codex_memories_extension::import_local::import_local_codex_memory;
+use codex_memories_extension::status::MemoryStatusReport;
+use codex_memories_extension::status::memory_status_report;
 #[cfg(target_os = "windows")]
 use codex_utils_approval_presets::ApprovalPreset;
 
@@ -700,6 +711,119 @@ impl App {
         }
     }
 
+    pub(super) async fn show_memory_status(&mut self) {
+        let report = memory_status_report(&self.config.memories).await;
+        self.chat_widget
+            .add_info_message(format_memory_status_report(&report), /*hint*/ None);
+    }
+
+    pub(super) async fn setup_portable_memory_with_app_server(
+        &mut self,
+        app_server: &mut AppServerSession,
+        setup: PortableMemorySetup,
+    ) {
+        let edits = crate::config_update::build_portable_memory_setup_edits(&setup);
+        let write_response = match crate::config_update::write_config_batch(
+            app_server.request_handle(),
+            edits,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to persist portable memory setup");
+                self.chat_widget
+                    .add_error_message(format!("Failed to save portable memory setup: {err}"));
+                return;
+            }
+        };
+
+        if write_response.status == WriteStatus::OkOverridden {
+            if !self
+                .sync_memory_after_overridden_write(
+                    app_server,
+                    &write_response,
+                    "Portable memory setup",
+                )
+                .await
+            {
+                return;
+            }
+        } else {
+            apply_portable_memory_setup(&mut self.config.memories, &setup);
+            self.chat_widget
+                .set_memories_config(self.config.memories.clone());
+        }
+
+        let status = memory_status_report(&self.config.memories).await;
+        self.chat_widget.add_info_message(
+            format!(
+                "Portable memory configured.\n{}",
+                format_memory_status_report(&status)
+            ),
+            /*hint*/ None,
+        );
+    }
+
+    pub(super) async fn disable_portable_memory_with_app_server(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) {
+        let edits = crate::config_update::build_portable_memory_disable_edits();
+        let write_response = match crate::config_update::write_config_batch(
+            app_server.request_handle(),
+            edits,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::error!(error = %err, "failed to disable portable memory");
+                self.chat_widget
+                    .add_error_message(format!("Failed to disable provider memory: {err}"));
+                return;
+            }
+        };
+
+        if write_response.status == WriteStatus::OkOverridden {
+            let _ = self
+                .sync_memory_after_overridden_write(
+                    app_server,
+                    &write_response,
+                    "Portable memory disable",
+                )
+                .await;
+            return;
+        }
+
+        self.config.memories.backend = codex_config::types::MemoryBackendKind::Local;
+        self.chat_widget
+            .set_memories_config(self.config.memories.clone());
+        self.chat_widget.add_info_message(
+            "Provider-backed memory disabled. Local memory remains active.".to_string(),
+            /*hint*/ None,
+        );
+    }
+
+    pub(super) async fn import_local_memory(&mut self, mode: MemoryImportMode) {
+        let mode_label = mode.as_str();
+        let import_mode = match mode {
+            MemoryImportMode::Preview => ImportLocalCodexMemoryMode::Preview,
+            MemoryImportMode::Apply => ImportLocalCodexMemoryMode::Apply,
+        };
+        match import_local_codex_memory(&self.config.codex_home, &self.config.memories, import_mode)
+            .await
+        {
+            Ok(report) => self.chat_widget.add_info_message(
+                format_import_local_report(&report, mode_label),
+                /*hint*/ None,
+            ),
+            Err(err) => self
+                .chat_widget
+                .add_error_message(format!("Failed to import local memories: {err}")),
+        }
+    }
+
     pub(super) async fn reset_memories_with_app_server(
         &mut self,
         app_server: &mut AppServerSession,
@@ -920,17 +1044,32 @@ impl App {
             );
             return false;
         };
-        let use_memories = memories
-            .use_memories
-            .unwrap_or(self.config.memories.use_memories);
-        let generate_memories = memories
-            .generate_memories
-            .unwrap_or(self.config.memories.generate_memories);
-        self.config.memories.use_memories = use_memories;
-        self.config.memories.generate_memories = generate_memories;
+        merge_memories_toml(&mut self.config.memories, memories);
         self.chat_widget
-            .set_memory_settings(use_memories, generate_memories);
+            .set_memories_config(self.config.memories.clone());
         true
+    }
+
+    async fn sync_memory_after_overridden_write(
+        &mut self,
+        app_server: &mut AppServerSession,
+        write_response: &ConfigWriteResponse,
+        label: &str,
+    ) -> bool {
+        let message = overridden_write_message(write_response);
+        tracing::warn!(
+            message,
+            "memory config write was overridden by effective config"
+        );
+        self.chat_widget
+            .add_error_message(format!("{label} was saved but not applied: {message}"));
+        let Some(effective_config) = self
+            .read_effective_config_after_overridden_write(app_server, label)
+            .await
+        else {
+            return false;
+        };
+        self.sync_memory_state_from_effective_config(&effective_config)
     }
 
     #[cfg(target_os = "windows")]
@@ -1034,6 +1173,124 @@ fn memories_from_effective_config(effective_config: &ConfigReadResponse) -> Opti
         .additional
         .get("memories")
         .and_then(|memories| serde_json::from_value(memories.clone()).ok())
+}
+
+fn apply_portable_memory_setup(memories: &mut MemoriesConfig, setup: &PortableMemorySetup) {
+    memories.backend = setup.backend;
+    memories.provider = setup.provider;
+    memories.profile = setup.profile;
+    memories.workspace = setup.workspace.clone();
+    memories.user_peer = setup.user_peer.clone();
+    memories.assistant_peer = setup.assistant_peer.clone();
+    memories.provider_url = setup.provider_url.clone();
+    memories.write_policy = MemoryWritePolicy::VisibleTurns;
+    memories.local_import_policy = LocalImportPolicy::Manual;
+    match setup.provider {
+        MemoryProviderKind::Honcho => {
+            memories.honcho_base_url = None;
+            memories.honcho_api_key_env = setup
+                .honcho_api_key_env
+                .clone()
+                .or_else(|| Some("HONCHO_API_KEY".to_string()));
+        }
+        MemoryProviderKind::CodexMemoryd => {
+            memories.honcho_base_url = None;
+            memories.honcho_api_key_env = None;
+        }
+    }
+}
+
+fn merge_memories_toml(memories: &mut MemoriesConfig, toml: MemoriesToml) {
+    if let Some(value) = toml.backend {
+        memories.backend = value;
+    }
+    if let Some(value) = toml.provider {
+        memories.provider = value;
+    }
+    if let Some(value) = toml.profile {
+        memories.profile = value;
+    }
+    if let Some(value) = toml.workspace {
+        memories.workspace = value;
+    }
+    if let Some(value) = toml.user_peer {
+        memories.user_peer = value;
+    }
+    if let Some(value) = toml.assistant_peer {
+        memories.assistant_peer = value;
+    }
+    if let Some(value) = toml.provider_url {
+        memories.provider_url = Some(value);
+    }
+    if let Some(value) = toml.honcho_base_url {
+        memories.honcho_base_url = Some(value);
+    }
+    if let Some(value) = toml.honcho_api_key_env {
+        memories.honcho_api_key_env = Some(value);
+    }
+    if let Some(value) = toml.write_policy {
+        memories.write_policy = value;
+    }
+    if let Some(value) = toml.sync_policy {
+        memories.sync_policy = value;
+    }
+    if let Some(value) = toml.local_import_policy {
+        memories.local_import_policy = value;
+    }
+    if let Some(value) = toml.cross_profile_policy {
+        memories.cross_profile_policy = value;
+    }
+    if let Some(value) = toml.disable_on_external_context {
+        memories.disable_on_external_context = value;
+    }
+    if let Some(value) = toml.generate_memories {
+        memories.generate_memories = value;
+    }
+    if let Some(value) = toml.use_memories {
+        memories.use_memories = value;
+    }
+    if let Some(value) = toml.dedicated_tools {
+        memories.dedicated_tools = value;
+    }
+}
+
+fn format_memory_status_report(report: &MemoryStatusReport) -> String {
+    let mut lines = vec![
+        "Portable memory status".to_string(),
+        format!("Backend: {}", report.backend),
+        format!("Provider: {}", report.provider),
+        format!("Profile: {}", report.profile),
+        format!("Workspace: {}", report.workspace),
+        format!("Provider configured: {}", report.provider_configured),
+        format!("Health: {}", report.health.status),
+    ];
+    if let Some(provider_url) = &report.provider_url {
+        lines.push(format!("Provider URL: {provider_url}"));
+    }
+    if let Some(env_var) = &report.honcho_api_key_env {
+        lines.push(format!("Honcho API key env: {env_var}"));
+    }
+    if let Some(detail) = &report.health.detail {
+        lines.push(format!("Detail: {detail}"));
+    }
+    lines.join("\n")
+}
+
+fn format_import_local_report(report: &ImportLocalCodexMemoryReport, mode_label: &str) -> String {
+    let mut lines = vec![
+        format!("Local memory import {mode_label}"),
+        format!("Backend: {}", report.backend),
+        format!("Profile: {}", report.profile),
+        format!("Workspace: {}", report.workspace),
+        format!("Provider configured: {}", report.provider_configured),
+        format!("Accepted files: {}", report.accepted_files),
+        format!("Rejected files: {}", report.rejected_files),
+        format!("Synced files: {}", report.synced_files),
+    ];
+    if let Some(warning) = &report.warning {
+        lines.push(format!("Warning: {warning}"));
+    }
+    lines.join("\n")
 }
 
 fn features_toml_from_json(value: &serde_json::Value) -> Option<FeaturesToml> {

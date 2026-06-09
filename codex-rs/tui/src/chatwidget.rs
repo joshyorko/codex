@@ -1054,8 +1054,7 @@ impl ChatWidget {
         }
 
         let view = MemoriesSettingsView::new(
-            self.config.memories.use_memories,
-            self.config.memories.generate_memories,
+            self.config.memories.clone(),
             self.app_event_tx.clone(),
             self.bottom_pane.list_keymap(),
         );
@@ -1101,6 +1100,10 @@ impl ChatWidget {
     pub(crate) fn set_memory_settings(&mut self, use_memories: bool, generate_memories: bool) {
         self.config.memories.use_memories = use_memories;
         self.config.memories.generate_memories = generate_memories;
+    }
+
+    pub(crate) fn set_memories_config(&mut self, memories: codex_config::types::MemoriesConfig) {
+        self.config.memories = memories;
     }
 
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {

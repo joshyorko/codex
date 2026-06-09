@@ -24,6 +24,7 @@ pub enum SlashCommand {
     Experimental,
     #[strum(to_string = "approve")]
     AutoReview,
+    #[strum(to_string = "memories", serialize = "memory")]
     Memories,
     Skills,
     Hooks,
@@ -158,6 +159,7 @@ impl SlashCommand {
                 | SlashCommand::Ide
                 | SlashCommand::Keymap
                 | SlashCommand::Mcp
+                | SlashCommand::Memories
                 | SlashCommand::Raw
                 | SlashCommand::Pets
                 | SlashCommand::Side
@@ -278,6 +280,13 @@ mod tests {
     fn pet_alias_parses_to_pets_command() {
         assert_eq!(SlashCommand::Pets.command(), "pets");
         assert_eq!(SlashCommand::from_str("pet"), Ok(SlashCommand::Pets));
+    }
+
+    #[test]
+    fn memory_alias_parses_to_memories_command_with_inline_args() {
+        assert_eq!(SlashCommand::Memories.command(), "memories");
+        assert_eq!(SlashCommand::from_str("memory"), Ok(SlashCommand::Memories));
+        assert!(SlashCommand::Memories.supports_inline_args());
     }
 
     #[test]

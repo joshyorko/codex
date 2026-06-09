@@ -99,6 +99,61 @@ Portable memory fields:
 - `sync_policy = "manual" | "startup"` remains a compatibility setting
 - `cross_profile_policy = "default_deny"`
 
+## Setup and Management
+
+Portable memory setup is built into Codex instead of routed through MCP or a
+plugin. The runtime recall and writeback path stays direct, fail-open, and
+available before/during/after turns; future plugins can add management surfaces
+without becoming the core memory transport.
+
+TUI flow:
+
+- `/memory` opens the Memory settings panel.
+- `/memory status` health-checks the selected backend/provider.
+- `/memory setup codex-memoryd [--backend provider|hybrid] [--provider-url URL]`
+  writes a local `codex-memoryd` provider config. When no URL is supplied, Codex
+  uses `http://127.0.0.1:8787`.
+- `/memory setup honcho [--backend provider|hybrid] [--honcho-api-key-env NAME]`
+  writes a Honcho provider config. Codex stores the environment variable name,
+  never the raw secret. When no name is supplied, Codex uses `HONCHO_API_KEY`.
+- `/memory import-local preview` shows the local memory import payload without
+  provider writes.
+- `/memory import-local apply` uploads accepted local memory files only after
+  explicit user action.
+- `/memory disable` switches `memories.backend` back to `local` and leaves
+  provider details in config for later reuse.
+
+The settings panel exposes the same actions: status, setup `codex-memoryd`,
+setup Honcho, switch to hybrid mode, preview/apply local import, disable
+provider memory, and reset local memory.
+
+CLI parity:
+
+```sh
+codex memory status
+codex memory setup --provider codex-memoryd --backend provider --provider-url http://127.0.0.1:8787
+codex memory setup --provider honcho --backend hybrid --honcho-api-key-env HONCHO_API_KEY
+codex memory import-local --preview
+codex memory import-local --apply
+codex memory disable
+```
+
+Setup writes only the minimal `[memories]` keys needed by the selected flow:
+`backend`, `provider`, `profile`, `workspace`, `user_peer`, `assistant_peer`,
+`provider_url` when applicable, `honcho_api_key_env` for Honcho, and manual
+import/visible-turn write policy defaults. Unrelated config is preserved through
+the normal config editing machinery.
+
+Health behavior:
+
+- `codex-memoryd` setup/status checks the configured provider via the `/v1`
+  adapter and the status path used by the provider.
+- Honcho setup/status uses the existing provider read path and reports missing
+  environment credentials or request failures as unreachable/unconfigured.
+- Provider failures never block normal Codex startup. Provider-backed tools and
+  runtime recall keep local fallback semantics where the selected backend allows
+  it.
+
 ## Development
 
 On Josh's Bluefin workstation, prefer the repo devcontainer or project

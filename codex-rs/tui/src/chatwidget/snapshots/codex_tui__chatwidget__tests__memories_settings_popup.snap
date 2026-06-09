@@ -1,16 +1,29 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 2200
 expression: popup
 ---
   Memories
-  Choose how Codex uses and creates memories. Changes are saved to config.toml
+  Choose local memory behavior and portable provider setup. Changes are saved
+  Backend: local   Provider: honcho   Profile: personal   Workspace: default
+  Connection: HONCHO_API_KEY
 
-› [x] Use memories       Use memories in the following threads. Applied at
-                         next thread.
-  [ ] Generate memories  Generate memories from the following threads. Current
-                         thread included.
-  Reset all memories     Clear local memory files and summaries. Existing
-                         threads stay intact.
+› [x] Use memories          Use memories in the following threads. Applied at
+                            next thread.
+  [ ] Generate memories     Generate memories from the following threads.
+                            Current thread included.
+  Status and health check   Check selected backend/provider without blocking
+                            startup.
+  Setup codex-memoryd       Use provider mode with http://127.0.0.1:8787 by
+                            default.
+  Setup Honcho              Use provider mode with HONCHO_API_KEY env var by
+                            default.
+  Use hybrid provider mode  Keep local cache/debug files and sync durable
+                            memory to provider.
+  Disable provider memory   Switch backend to local while preserving provider
+                            settings.
+  Preview local import      Inspect local memory sync payload without provider
+                            writes.
 
   Learn more: https://developers.openai.com/codex/memories
 

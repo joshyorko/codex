@@ -1,4 +1,8 @@
 use super::*;
+use codex_config::types::MemoryBackendKind;
+use codex_config::types::MemoryProfile;
+use codex_config::types::MemoryProviderKind;
+use codex_config::types::MemoryWritePolicy;
 use color_eyre::eyre::WrapErr;
 use pretty_assertions::assert_eq;
 use std::path::Path;
@@ -36,5 +40,82 @@ fn format_config_error_preserves_server_validation_message() {
         format_config_error(&err),
         "config/batchWrite failed in TUI: config/batchWrite failed: Invalid configuration: \
          features.fast_mode=true violates managed requirements; allowed set [fast_mode=false]"
+    );
+}
+
+#[test]
+fn portable_memory_setup_edits_configure_codex_memoryd_without_secrets() {
+    let setup = PortableMemorySetup {
+        backend: MemoryBackendKind::Hybrid,
+        provider: MemoryProviderKind::CodexMemoryd,
+        profile: MemoryProfile::Oss,
+        workspace: "codex-memory-lab".to_string(),
+        user_peer: "josh".to_string(),
+        assistant_peer: "codex".to_string(),
+        provider_url: Some("http://127.0.0.1:8787".to_string()),
+        honcho_api_key_env: None,
+    };
+
+    let edits = build_portable_memory_setup_edits(&setup);
+
+    assert!(edits.contains(&replace_config_value(
+        "memories.backend",
+        serde_json::json!("hybrid")
+    )));
+    assert!(edits.contains(&replace_config_value(
+        "memories.provider",
+        serde_json::json!("codex_memoryd")
+    )));
+    assert!(edits.contains(&replace_config_value(
+        "memories.profile",
+        serde_json::json!("oss")
+    )));
+    assert!(edits.contains(&replace_config_value(
+        "memories.provider_url",
+        serde_json::json!("http://127.0.0.1:8787")
+    )));
+    assert!(edits.contains(&replace_config_value(
+        "memories.write_policy",
+        serde_json::json!(MemoryWritePolicy::VisibleTurns.as_str())
+    )));
+    assert!(edits.contains(&clear_config_value("memories.honcho_api_key_env")));
+}
+
+#[test]
+fn portable_memory_setup_edits_configure_honcho_env_var_not_secret() {
+    let setup = PortableMemorySetup {
+        backend: MemoryBackendKind::Provider,
+        provider: MemoryProviderKind::Honcho,
+        profile: MemoryProfile::Personal,
+        workspace: "default".to_string(),
+        user_peer: "user".to_string(),
+        assistant_peer: "codex".to_string(),
+        provider_url: None,
+        honcho_api_key_env: Some("HONCHO_TOKEN".to_string()),
+    };
+
+    let edits = build_portable_memory_setup_edits(&setup);
+
+    assert!(edits.contains(&replace_config_value(
+        "memories.provider",
+        serde_json::json!("honcho")
+    )));
+    assert!(edits.contains(&replace_config_value(
+        "memories.honcho_api_key_env",
+        serde_json::json!("HONCHO_TOKEN")
+    )));
+    assert!(edits.contains(&clear_config_value("memories.provider_url")));
+    assert!(!edits.iter().any(|edit| edit.key_path.contains("api_key")
+        && edit.value == serde_json::json!("HONCHO_SECRET_VALUE")));
+}
+
+#[test]
+fn portable_memory_disable_only_switches_backend_to_local() {
+    assert_eq!(
+        build_portable_memory_disable_edits(),
+        vec![replace_config_value(
+            "memories.backend",
+            serde_json::json!("local")
+        )]
     );
 }

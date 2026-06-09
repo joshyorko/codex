@@ -1596,6 +1596,20 @@ impl App {
                 )
                 .await;
             }
+            AppEvent::ShowMemoryStatus => {
+                self.show_memory_status().await;
+            }
+            AppEvent::SetupPortableMemory(setup) => {
+                self.setup_portable_memory_with_app_server(app_server, setup)
+                    .await;
+            }
+            AppEvent::DisablePortableMemory => {
+                self.disable_portable_memory_with_app_server(app_server)
+                    .await;
+            }
+            AppEvent::ImportLocalMemory { mode } => {
+                self.import_local_memory(mode).await;
+            }
             AppEvent::ResetMemories => {
                 self.reset_memories_with_app_server(app_server).await;
             }

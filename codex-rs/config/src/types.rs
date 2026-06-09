@@ -455,6 +455,16 @@ pub enum MemoryBackendKind {
     Hybrid,
 }
 
+impl MemoryBackendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Provider => "provider",
+            Self::Hybrid => "hybrid",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryProviderKind {
@@ -498,6 +508,15 @@ pub enum MemoryWritePolicy {
     VisibleTurns,
 }
 
+impl MemoryWritePolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::VisibleTurns => "visible_turns",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MemorySyncPolicy {
@@ -512,6 +531,17 @@ pub enum LocalImportPolicy {
     Manual,
     StartupPreview,
     StartupApply,
+}
+
+impl LocalImportPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt",
+            Self::Manual => "manual",
+            Self::StartupPreview => "startup_preview",
+            Self::StartupApply => "startup_apply",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

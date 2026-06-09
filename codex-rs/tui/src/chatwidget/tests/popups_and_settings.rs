@@ -2192,6 +2192,11 @@ async fn memories_settings_popup_snapshot() {
     chat.open_memories_popup();
 
     let popup = strip_osc8_for_snapshot(&render_bottom_popup(&chat, /*width*/ 80));
+    assert!(popup.contains("Backend"));
+    assert!(popup.contains("Setup codex-memoryd"));
+    assert!(popup.contains("Setup Honcho"));
+    assert!(popup.contains("Preview local import"));
+    assert!(popup.contains("Disable provider memory"));
     assert_chatwidget_snapshot!("memories_settings_popup", popup);
 }
 

@@ -3946,6 +3946,7 @@ dependencies = [
  "codex-install-context",
  "codex-login",
  "codex-mcp",
+ "codex-memories-extension",
  "codex-message-history",
  "codex-model-provider",
  "codex-model-provider-info",

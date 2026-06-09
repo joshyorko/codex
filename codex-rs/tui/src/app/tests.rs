@@ -75,6 +75,9 @@ use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_app_server_protocol::UserInput as AppServerUserInput;
 use codex_app_server_protocol::WarningNotification;
+use codex_config::types::MemoryBackendKind;
+use codex_config::types::MemoryProfile;
+use codex_config::types::MemoryProviderKind;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationMode;
@@ -1653,6 +1656,79 @@ async fn update_memory_settings_persists_and_updates_widget_config() -> Result<(
     );
     app_server.shutdown().await?;
     Ok(())
+}
+
+#[test]
+fn setup_portable_memory_persists_provider_config_and_updates_widget() -> Result<()> {
+    const WORKER_THREADS: usize = 1;
+    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(WORKER_THREADS)
+        .thread_stack_size(TEST_STACK_SIZE_BYTES)
+        .enable_all()
+        .build()?;
+
+    runtime.block_on(async {
+        let (mut app, _app_event_rx, _op_rx) = Box::pin(make_test_app_with_channels()).await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+
+        Box::pin(app.setup_portable_memory_with_app_server(
+            &mut app_server,
+            crate::config_update::PortableMemorySetup {
+                backend: MemoryBackendKind::Hybrid,
+                provider: MemoryProviderKind::CodexMemoryd,
+                profile: MemoryProfile::Oss,
+                workspace: "codex-memory-lab".to_string(),
+                user_peer: "josh".to_string(),
+                assistant_peer: "codex".to_string(),
+                provider_url: Some("http://127.0.0.1:8787".to_string()),
+                honcho_api_key_env: None,
+            },
+        ))
+        .await;
+
+        assert_eq!(app.config.memories.backend, MemoryBackendKind::Hybrid);
+        assert_eq!(
+            app.chat_widget.config_ref().memories.backend,
+            MemoryBackendKind::Hybrid
+        );
+        assert_eq!(
+            app.config.memories.provider,
+            MemoryProviderKind::CodexMemoryd
+        );
+        assert_eq!(
+            app.config.memories.provider_url.as_deref(),
+            Some("http://127.0.0.1:8787")
+        );
+        assert_eq!(app.config.memories.honcho_api_key_env, None);
+
+        let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
+        let config_value = toml::from_str::<TomlValue>(&config)?;
+        let memories = config_value
+            .as_table()
+            .and_then(|table| table.get("memories"))
+            .and_then(TomlValue::as_table)
+            .expect("memories table should exist");
+        assert_eq!(
+            memories.get("backend"),
+            Some(&TomlValue::String("hybrid".to_string()))
+        );
+        assert_eq!(
+            memories.get("provider"),
+            Some(&TomlValue::String("codex_memoryd".to_string()))
+        );
+        assert_eq!(
+            memories.get("provider_url"),
+            Some(&TomlValue::String("http://127.0.0.1:8787".to_string()))
+        );
+        assert!(!memories.contains_key("honcho_api_key_env"));
+        app_server.shutdown().await?;
+        Ok(())
+    })
 }
 
 #[test]

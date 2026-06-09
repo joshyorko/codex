@@ -52,6 +52,21 @@ use codex_realtime_webrtc::RealtimeWebrtcSessionHandle;
 use crate::history_cell::HistoryCell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemoryImportMode {
+    Preview,
+    Apply,
+}
+
+impl MemoryImportMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Preview => "preview",
+            Self::Apply => "apply",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RealtimeAudioDeviceKind {
     Microphone,
     Speaker,
@@ -791,6 +806,20 @@ pub(crate) enum AppEvent {
     UpdateMemorySettings {
         use_memories: bool,
         generate_memories: bool,
+    },
+
+    /// Show portable memory backend/provider status.
+    ShowMemoryStatus,
+
+    /// Configure provider-backed portable memory.
+    SetupPortableMemory(crate::config_update::PortableMemorySetup),
+
+    /// Disable provider-backed portable memory while keeping provider fields.
+    DisablePortableMemory,
+
+    /// Preview or apply local memory import to a portable provider.
+    ImportLocalMemory {
+        mode: MemoryImportMode,
     },
 
     /// Clear all persisted local memory artifacts via the app-server.
