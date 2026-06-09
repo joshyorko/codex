@@ -42,6 +42,7 @@ use owo_colors::OwoColorize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use supports_color::Stream;
+use toml_edit::value;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
@@ -66,9 +67,15 @@ use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
 
 use codex_config::LoaderOverrides;
+use codex_config::types::LocalImportPolicy;
+use codex_config::types::MemoryBackendKind;
+use codex_config::types::MemoryProfile;
+use codex_config::types::MemoryProviderKind;
+use codex_config::types::MemoryWritePolicy;
 use codex_core::build_models_manager;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
+use codex_core::config::edit::ConfigEdit;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::find_codex_home;
 use codex_core::config::resolve_profile_v2_config_path;
@@ -80,6 +87,7 @@ use codex_login::CodexAuth;
 use codex_login::read_codex_access_token_from_env;
 use codex_memories_extension::import_local::ImportLocalCodexMemoryMode;
 use codex_memories_extension::import_local::import_local_codex_memory;
+use codex_memories_extension::status::memory_status_report;
 use codex_memories_write::clear_memory_roots_contents;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
@@ -225,9 +233,84 @@ struct MemoryCommand {
 
 #[derive(Debug, clap::Subcommand)]
 enum MemorySubcommand {
+    /// Print effective Codex memory configuration and provider health as JSON.
+    Status,
+
+    /// Configure a portable memory provider in config.toml.
+    Setup(MemorySetupCommand),
+
+    /// Disable provider-backed memory while preserving provider settings.
+    Disable,
+
     /// Import local Codex memory into the configured portable memory provider.
     #[clap(name = "import-local")]
     ImportLocal(ImportLocalCommand),
+}
+
+#[derive(Debug, Args)]
+struct MemorySetupCommand {
+    /// Memory backend mode to persist.
+    #[arg(long, value_parser = parse_memory_backend_kind, default_value = "provider")]
+    backend: MemoryBackendKind,
+
+    /// Portable memory provider to persist.
+    #[arg(long, value_parser = parse_memory_provider_kind)]
+    provider: MemoryProviderKind,
+
+    /// Provider base URL. Required for codex-memoryd provider-backed modes.
+    #[arg(long)]
+    provider_url: Option<String>,
+
+    /// Portable memory profile.
+    #[arg(long, value_parser = parse_memory_profile)]
+    profile: Option<MemoryProfile>,
+
+    /// Portable memory workspace ID.
+    #[arg(long)]
+    workspace: Option<String>,
+
+    /// Honcho API key environment variable name. Raw secrets are never written.
+    #[arg(long)]
+    honcho_api_key_env: Option<String>,
+
+    /// Human peer ID for peer-model providers.
+    #[arg(long)]
+    user_peer: Option<String>,
+
+    /// Assistant peer ID for peer-model providers.
+    #[arg(long)]
+    assistant_peer: Option<String>,
+}
+
+fn parse_memory_backend_kind(raw: &str) -> Result<MemoryBackendKind, String> {
+    match normalized_memory_arg(raw).as_str() {
+        "local" => Ok(MemoryBackendKind::Local),
+        "provider" => Ok(MemoryBackendKind::Provider),
+        "hybrid" => Ok(MemoryBackendKind::Hybrid),
+        _ => Err("expected one of: local, provider, hybrid".to_string()),
+    }
+}
+
+fn parse_memory_provider_kind(raw: &str) -> Result<MemoryProviderKind, String> {
+    match normalized_memory_arg(raw).as_str() {
+        "honcho" => Ok(MemoryProviderKind::Honcho),
+        "codex_memoryd" => Ok(MemoryProviderKind::CodexMemoryd),
+        _ => Err("expected one of: honcho, codex-memoryd".to_string()),
+    }
+}
+
+fn parse_memory_profile(raw: &str) -> Result<MemoryProfile, String> {
+    match normalized_memory_arg(raw).as_str() {
+        "personal" => Ok(MemoryProfile::Personal),
+        "work" => Ok(MemoryProfile::Work),
+        "oss" => Ok(MemoryProfile::Oss),
+        "homelab" => Ok(MemoryProfile::Homelab),
+        _ => Err("expected one of: personal, work, oss, homelab".to_string()),
+    }
+}
+
+fn normalized_memory_arg(raw: &str) -> String {
+    raw.trim().replace('-', "_").to_ascii_lowercase()
 }
 
 #[derive(Debug, Args)]
@@ -1103,6 +1186,15 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 "memory",
             )?;
             match subcommand {
+                MemorySubcommand::Status => {
+                    run_memory_status_command(&root_config_overrides).await?;
+                }
+                MemorySubcommand::Setup(cmd) => {
+                    run_memory_setup_command(cmd).await?;
+                }
+                MemorySubcommand::Disable => {
+                    run_memory_disable_command().await?;
+                }
                 MemorySubcommand::ImportLocal(cmd) => {
                     run_memory_import_local_command(cmd, &root_config_overrides).await?;
                 }
@@ -1975,6 +2067,164 @@ async fn run_debug_models_command(
     serde_json::to_writer(std::io::stdout(), &catalog)?;
     println!();
     Ok(())
+}
+
+async fn run_memory_status_command(
+    root_config_overrides: &CliConfigOverrides,
+) -> anyhow::Result<()> {
+    let cli_kv_overrides = root_config_overrides
+        .parse_overrides()
+        .map_err(anyhow::Error::msg)?;
+    let config = ConfigBuilder::default()
+        .cli_overrides(cli_kv_overrides)
+        .build()
+        .await?;
+    let report = memory_status_report(&config.memories).await;
+    serde_json::to_writer_pretty(std::io::stdout(), &report)?;
+    println!();
+    Ok(())
+}
+
+async fn run_memory_setup_command(cmd: MemorySetupCommand) -> anyhow::Result<()> {
+    let edits = memory_setup_edits(&cmd)?;
+    let codex_home = find_codex_home()?;
+    ConfigEditsBuilder::new(&codex_home)
+        .with_edits(edits)
+        .apply()
+        .await?;
+    println!(
+        "Configured memory provider `{}` with `{}` backend in config.toml.",
+        cmd.provider.as_str(),
+        memory_backend_kind_as_str(cmd.backend)
+    );
+    Ok(())
+}
+
+async fn run_memory_disable_command() -> anyhow::Result<()> {
+    let codex_home = find_codex_home()?;
+    ConfigEditsBuilder::new(&codex_home)
+        .with_edits([memory_string_edit("backend", "local")])
+        .apply()
+        .await?;
+    println!("Disabled provider-backed memory in config.toml.");
+    Ok(())
+}
+
+fn memory_setup_edits(cmd: &MemorySetupCommand) -> anyhow::Result<Vec<ConfigEdit>> {
+    let provider_url = trimmed_non_empty(cmd.provider_url.as_deref());
+    if matches!(cmd.provider, MemoryProviderKind::CodexMemoryd)
+        && !matches!(cmd.backend, MemoryBackendKind::Local)
+        && provider_url.is_none()
+    {
+        anyhow::bail!("--provider-url is required when using --provider codex-memoryd");
+    }
+
+    let profile = cmd.profile.unwrap_or(MemoryProfile::Personal);
+    let workspace = trimmed_non_empty(cmd.workspace.as_deref())
+        .unwrap_or("default")
+        .to_string();
+    let user_peer = trimmed_non_empty(cmd.user_peer.as_deref())
+        .unwrap_or("user")
+        .to_string();
+    let assistant_peer = trimmed_non_empty(cmd.assistant_peer.as_deref())
+        .unwrap_or("codex")
+        .to_string();
+
+    let mut edits = vec![
+        memory_string_edit("backend", memory_backend_kind_as_str(cmd.backend)),
+        memory_string_edit("provider", cmd.provider.as_str()),
+        memory_string_edit("profile", profile.as_str()),
+        memory_string_edit("workspace", &workspace),
+        memory_string_edit("user_peer", &user_peer),
+        memory_string_edit("assistant_peer", &assistant_peer),
+        memory_string_edit(
+            "write_policy",
+            memory_write_policy_as_str(MemoryWritePolicy::VisibleTurns),
+        ),
+        memory_string_edit(
+            "local_import_policy",
+            local_import_policy_as_str(LocalImportPolicy::Manual),
+        ),
+    ];
+
+    if let Some(provider_url) = provider_url {
+        edits.push(memory_string_edit("provider_url", provider_url));
+    } else if matches!(cmd.provider, MemoryProviderKind::Honcho) {
+        edits.push(memory_clear_edit("provider_url"));
+        edits.push(memory_clear_edit("honcho_base_url"));
+    }
+
+    match cmd.provider {
+        MemoryProviderKind::Honcho => {
+            let env_var =
+                trimmed_non_empty(cmd.honcho_api_key_env.as_deref()).unwrap_or("HONCHO_API_KEY");
+            validate_env_var_name(env_var)?;
+            edits.push(memory_string_edit("honcho_api_key_env", env_var));
+        }
+        MemoryProviderKind::CodexMemoryd => {
+            edits.push(memory_clear_edit("honcho_base_url"));
+            edits.push(memory_clear_edit("honcho_api_key_env"));
+        }
+    }
+
+    Ok(edits)
+}
+
+fn memory_string_edit(key: &str, setting: &str) -> ConfigEdit {
+    ConfigEdit::SetPath {
+        segments: vec!["memories".to_string(), key.to_string()],
+        value: value(setting.to_string()),
+    }
+}
+
+fn memory_clear_edit(key: &str) -> ConfigEdit {
+    ConfigEdit::ClearPath {
+        segments: vec!["memories".to_string(), key.to_string()],
+    }
+}
+
+fn trimmed_non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn validate_env_var_name(name: &str) -> anyhow::Result<()> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        anyhow::bail!("environment variable name must not be empty");
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        anyhow::bail!("environment variable name must start with a letter or underscore");
+    }
+    if chars.any(|ch| !(ch == '_' || ch.is_ascii_alphanumeric())) {
+        anyhow::bail!(
+            "environment variable name must contain only ASCII letters, numbers, and underscores"
+        );
+    }
+    Ok(())
+}
+
+fn memory_backend_kind_as_str(value: MemoryBackendKind) -> &'static str {
+    match value {
+        MemoryBackendKind::Local => "local",
+        MemoryBackendKind::Provider => "provider",
+        MemoryBackendKind::Hybrid => "hybrid",
+    }
+}
+
+fn memory_write_policy_as_str(value: MemoryWritePolicy) -> &'static str {
+    match value {
+        MemoryWritePolicy::Off => "off",
+        MemoryWritePolicy::VisibleTurns => "visible_turns",
+    }
+}
+
+fn local_import_policy_as_str(value: LocalImportPolicy) -> &'static str {
+    match value {
+        LocalImportPolicy::Prompt => "prompt",
+        LocalImportPolicy::Manual => "manual",
+        LocalImportPolicy::StartupPreview => "startup_preview",
+        LocalImportPolicy::StartupApply => "startup_apply",
+    }
 }
 
 async fn run_memory_import_local_command(

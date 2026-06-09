@@ -222,10 +222,34 @@ commit="$(git rev-parse HEAD)"
 committed_at="$(git show -s --format=%cI HEAD)"
 timestamp="$(date -u -d "${committed_at}" +%Y%m%d%H%M%S)"
 version="release.${timestamp}.${commit:0:12}"
+rust_version="${CODEX_TAP_RUST_VERSION:-}"
+if [[ -z "${rust_version}" ]]; then
+  rust_version="$(
+    git for-each-ref --sort=-creatordate --format='%(refname:short)' refs/tags/rust-v* \
+      | sed -nE 's/^rust-v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' \
+      | head -n 1
+  )"
+fi
+if [[ -z "${rust_version}" ]]; then
+  echo "Could not resolve stable rust-v* release tag for tap-release packaging." >&2
+  exit 1
+fi
 release_tag="codex-release-${version}"
 asset_name="${release_tag}.tar.gz"
 package_dir="${output_dir}/package-${target}"
 archive_path="${output_dir}/${asset_name}"
+
+cargo_toml_backup="${RUNNER_TEMP}/Cargo.toml.tap-release.bak"
+cargo_lock_backup="${RUNNER_TEMP}/Cargo.lock.tap-release.bak"
+cp codex-rs/Cargo.toml "${cargo_toml_backup}"
+cp codex-rs/Cargo.lock "${cargo_lock_backup}"
+restore_stamped_cargo_files() {
+  cp "${cargo_toml_backup}" codex-rs/Cargo.toml
+  cp "${cargo_lock_backup}" codex-rs/Cargo.lock
+}
+trap restore_stamped_cargo_files EXIT
+
+python3 scripts/stamp_rust_workspace_version.py "${rust_version}"
 
 python3 scripts/build_codex_package.py \
   --target "${target}" \
@@ -234,6 +258,21 @@ python3 scripts/build_codex_package.py \
   --package-dir "${package_dir}" \
   --archive-output "${archive_path}" \
   --force
+
+built_version="$("${CARGO_TARGET_DIR}/${target}/release/codex" --version)"
+case "${built_version}" in
+  *" 0.0.0"*)
+    echo "Refusing to package codex 0.0.0" >&2
+    exit 1
+    ;;
+esac
+case "${built_version}" in
+  *" ${rust_version}") ;;
+  *)
+    echo "Expected codex ${rust_version}, got ${built_version}" >&2
+    exit 1
+    ;;
+esac
 
 sha256sum "${archive_path}" | tee "${archive_path}.sha256"
 cp "${CARGO_TARGET_DIR}/${target}/release/codex" "${output_dir}/codex"
@@ -289,6 +328,7 @@ fi
 cat <<EOF
 Built local Codex tap release asset.
   version:      ${version}
+  rust version: ${rust_version}
   release tag:  ${release_tag}
   archive:      ${archive_path}
   sha256:       ${archive_path}.sha256

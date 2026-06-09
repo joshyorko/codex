@@ -338,7 +338,7 @@ fn local_memory_file_metadata(
     metadata
 }
 
-fn settings_from_config(memories: &MemoriesConfig) -> PortableMemorySettings {
+pub(crate) fn settings_from_config(memories: &MemoriesConfig) -> PortableMemorySettings {
     PortableMemorySettings {
         backend: memories.backend,
         profile: memories.profile,

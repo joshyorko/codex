@@ -8,11 +8,15 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "tap-release-linux.yml"
+LOCAL_SCRIPT = REPO_ROOT / "scripts" / "build-local-tap-release.sh"
 
 
 class TapReleaseLinuxWorkflowTest(unittest.TestCase):
     def workflow(self) -> str:
         return WORKFLOW.read_text(encoding="utf-8")
+
+    def local_script(self) -> str:
+        return LOCAL_SCRIPT.read_text(encoding="utf-8")
 
     def test_workflow_is_scoped_to_the_tap_release_branch(self) -> None:
         workflow = self.workflow()
@@ -40,6 +44,24 @@ class TapReleaseLinuxWorkflowTest(unittest.TestCase):
             re.IGNORECASE,
         )
         self.assertIsNone(forbidden.search(workflow))
+
+    def test_workflow_stamps_real_rust_version_and_rejects_zero_version(self) -> None:
+        workflow = self.workflow()
+
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn("fetch-tags: true", workflow)
+        self.assertIn("rust_version=", workflow)
+        self.assertIn("scripts/stamp_rust_workspace_version.py", workflow)
+        self.assertIn("Refusing to package codex 0.0.0", workflow)
+        self.assertIn("--version", workflow)
+
+    def test_local_build_stamps_real_rust_version_and_rejects_zero_version(self) -> None:
+        local_script = self.local_script()
+
+        self.assertIn("rust_version=", local_script)
+        self.assertIn("scripts/stamp_rust_workspace_version.py", local_script)
+        self.assertIn("Refusing to package codex 0.0.0", local_script)
+        self.assertIn("--version", local_script)
 
     def test_workflow_uses_actions_cache_and_dispatches_the_tap(self) -> None:
         workflow = self.workflow()

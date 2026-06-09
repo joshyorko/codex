@@ -12,6 +12,7 @@ mod provider;
 mod runtime;
 mod schema;
 mod selected;
+pub mod status;
 mod tools;
 
 pub use extension::install;
