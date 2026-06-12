@@ -39,9 +39,7 @@ def stamp_workspace_manifest(version: str) -> None:
         raise RuntimeError("missing workspace.package version in codex-rs/Cargo.toml")
 
     text = (
-        text[: workspace_match.start(2)]
-        + stamped_body
-        + text[workspace_match.end(2) :]
+        text[: workspace_match.start(2)] + stamped_body + text[workspace_match.end(2) :]
     )
     CARGO_TOML.write_text(text, encoding="utf-8")
 
@@ -69,7 +67,10 @@ def stamp_lockfile(version: str) -> int:
 
 def main() -> int:
     if len(sys.argv) != 2:
-        print("usage: scripts/stamp_rust_workspace_version.py <semver>", file=sys.stderr)
+        print(
+            "usage: scripts/stamp_rust_workspace_version.py <semver>",
+            file=sys.stderr,
+        )
         return 2
 
     version = sys.argv[1].strip()
@@ -83,7 +84,9 @@ def main() -> int:
         print("no local 0.0.0 packages found in codex-rs/Cargo.lock", file=sys.stderr)
         return 1
 
-    print(f"Stamped codex-rs workspace version {version} ({lock_replacements} lock packages)")
+    print(
+        f"Stamped codex-rs workspace version {version} ({lock_replacements} lock packages)"
+    )
     return 0
 
 
