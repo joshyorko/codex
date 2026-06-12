@@ -1233,6 +1233,17 @@ fn honcho_settings(
     }
 }
 
+fn codex_memoryd_settings(
+    backend: codex_config::types::MemoryBackendKind,
+    workspace: &str,
+    provider_url: Option<String>,
+) -> PortableMemorySettings {
+    let mut settings = honcho_settings(backend, workspace);
+    settings.provider = codex_config::types::MemoryProviderKind::CodexMemoryd;
+    settings.provider_url = provider_url;
+    settings
+}
+
 #[derive(Clone)]
 struct FailingMemoryProvider;
 
@@ -1294,16 +1305,28 @@ fn provider_unavailable<T>() -> ProviderFuture<'static, T> {
 }
 
 mod provider_conformance {
+    use codex_extension_api::ExtensionData;
+    use codex_protocol::items::AgentMessageContent;
+    use codex_protocol::items::AgentMessageItem;
+    use codex_protocol::items::TurnItem;
+    use codex_protocol::items::UserMessageItem;
+    use codex_protocol::user_input::UserInput;
+    use codex_utils_absolute_path::test_support::PathExt;
+
     use super::InMemoryHonchoMemoryClient;
     use super::LocalMemoriesBackend;
+    use super::PortableMemoryRuntime;
     use super::SelectedMemoriesBackend;
+    use super::codex_memoryd_settings;
     use super::honcho_settings;
+    use crate::backend::AddAdHocMemoryNoteRequest;
     use crate::backend::ListMemoriesRequest;
     use crate::backend::MemoriesBackend;
     use crate::backend::MemoriesBackendError;
     use crate::backend::ReadMemoryRequest;
     use crate::backend::SearchMatchMode;
     use crate::backend::SearchMemoriesRequest;
+    use crate::codex_memoryd::serve_scripted;
 
     #[tokio::test]
     async fn local_list_sorting_cursor_and_invalid_cursor() {
@@ -1592,8 +1615,335 @@ mod provider_conformance {
         .expect_err("honcho should reject empty query before client usage");
         assert!(matches!(honcho_err, MemoriesBackendError::EmptyQuery));
 
-        // CodexMemorydProvider is covered by its own HTTP tests; this conformance
-        // test stays on the public Honcho path to avoid private constructor access.
+        let memoryd_backend = SelectedMemoriesBackend::from_settings(
+            LocalMemoriesBackend::from_memory_root(&memory_root),
+            codex_memoryd_settings(
+                codex_config::types::MemoryBackendKind::Provider,
+                "codex-memory-lab",
+                Some("http://127.0.0.1:65535".to_string()),
+            ),
+        );
+        let memoryd_err = MemoriesBackend::search(
+            &memoryd_backend,
+            SearchMemoriesRequest {
+                queries: vec![],
+                match_mode: SearchMatchMode::Any,
+                path: None,
+                cursor: None,
+                context_lines: 0,
+                case_sensitive: false,
+                normalized: false,
+                max_results: 10,
+            },
+        )
+        .await
+        .expect_err("codex_memoryd should reject empty query before client usage");
+        assert!(matches!(memoryd_err, MemoriesBackendError::EmptyQuery));
+    }
+
+    #[tokio::test]
+    async fn codex_memoryd_provider_search_fans_out_and_maps_matches() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let memory_root = tempdir.path().join("memories");
+        tokio::fs::create_dir_all(&memory_root)
+            .await
+            .expect("create memory root");
+        let (base_url, request_rx, server) = serve_scripted(vec![
+            (
+                "200 OK",
+                r#"{"ok":true,"data":{"matches":[{"path":"alpha.md","content":"alpha hit"}]}}"#,
+            ),
+            (
+                "200 OK",
+                r#"{"ok":true,"data":{"matches":[{"path":"needle.md","content":"needle hit"}]}}"#,
+            ),
+        ]);
+        let backend = SelectedMemoriesBackend::from_settings(
+            LocalMemoriesBackend::from_memory_root(&memory_root),
+            codex_memoryd_settings(
+                codex_config::types::MemoryBackendKind::Provider,
+                "codex-memory-lab",
+                Some(base_url),
+            ),
+        );
+
+        let search = MemoriesBackend::search(
+            &backend,
+            SearchMemoriesRequest {
+                queries: vec!["alpha".to_string(), "needle".to_string()],
+                match_mode: SearchMatchMode::Any,
+                path: None,
+                cursor: None,
+                context_lines: 0,
+                case_sensitive: false,
+                normalized: false,
+                max_results: 10,
+            },
+        )
+        .await
+        .expect("codex_memoryd search should succeed");
+
+        let first_request = request_rx.recv().expect("first search request");
+        let second_request = request_rx.recv().expect("second search request");
+        server.join().expect("server thread should finish");
+
+        assert!(first_request.starts_with("POST /v1/search "));
+        assert!(first_request.contains(r#""query":"alpha""#));
+        assert!(second_request.starts_with("POST /v1/search "));
+        assert!(second_request.contains(r#""query":"needle""#));
+        assert_eq!(
+            search.matches,
+            vec![
+                crate::backend::MemorySearchMatch {
+                    path: "alpha.md".to_string(),
+                    match_line_number: 1,
+                    content_start_line_number: 1,
+                    content: "alpha hit".to_string(),
+                    matched_queries: vec!["alpha".to_string()],
+                },
+                crate::backend::MemorySearchMatch {
+                    path: "needle.md".to_string(),
+                    match_line_number: 2,
+                    content_start_line_number: 2,
+                    content: "needle hit".to_string(),
+                    matched_queries: vec!["needle".to_string()],
+                },
+            ]
+        );
+        assert_eq!(search.queries, vec!["alpha", "needle"]);
+        assert_eq!(search.match_mode, SearchMatchMode::Any);
+        assert!(!search.truncated);
+        assert_eq!(search.next_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn codex_memoryd_provider_list_and_read_portable_status_round_trip() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let memory_root = tempdir.path().join("memories");
+        tokio::fs::create_dir_all(&memory_root)
+            .await
+            .expect("create memory root");
+        let (base_url, request_rx, server) = serve_scripted(vec![(
+            "200 OK",
+            r#"{"ok":true,"data":{"state":"ready","summary":"portable memory status"}}"#,
+        )]);
+        let backend = SelectedMemoriesBackend::from_settings(
+            LocalMemoriesBackend::from_memory_root(&memory_root),
+            codex_memoryd_settings(
+                codex_config::types::MemoryBackendKind::Provider,
+                "codex-memory-lab",
+                Some(base_url),
+            ),
+        );
+
+        let list = MemoriesBackend::list(
+            &backend,
+            ListMemoriesRequest {
+                path: None,
+                cursor: None,
+                max_results: 10,
+            },
+        )
+        .await
+        .expect("codex_memoryd list should succeed");
+        assert_eq!(list.path, None);
+        assert_eq!(
+            list.entries,
+            vec![crate::backend::MemoryEntry {
+                path: "portable/status.md".to_string(),
+                entry_type: crate::backend::MemoryEntryType::File,
+            }]
+        );
+
+        let read = MemoriesBackend::read(
+            &backend,
+            ReadMemoryRequest {
+                path: "portable/status.md".to_string(),
+                line_offset: 1,
+                max_lines: Some(10),
+                max_tokens: 1024,
+            },
+        )
+        .await
+        .expect("codex_memoryd read should succeed");
+
+        let request = request_rx.recv().expect("status request");
+        server.join().expect("server thread should finish");
+
+        assert!(request.starts_with("GET /v1/status "));
+        assert_eq!(read.path, "portable/status.md");
+        assert_eq!(read.start_line_number, 1);
+        assert!(!read.truncated);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&read.content).expect("pretty-printed JSON"),
+            serde_json::json!({
+                "state": "ready",
+                "summary": "portable memory status"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_memoryd_provider_add_note_posts_conclusion_payload() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let memory_root = tempdir.path().join("memories");
+        tokio::fs::create_dir_all(&memory_root)
+            .await
+            .expect("create memory root");
+        let (base_url, request_rx, server) =
+            serve_scripted(vec![("200 OK", r#"{"ok":true,"data":{}}"#)]);
+        let backend = SelectedMemoriesBackend::from_settings(
+            LocalMemoriesBackend::from_memory_root(&memory_root),
+            codex_memoryd_settings(
+                codex_config::types::MemoryBackendKind::Provider,
+                "codex-memory-lab",
+                Some(base_url),
+            ),
+        );
+
+        crate::backend::MemoriesBackend::add_ad_hoc_note(
+            &backend,
+            AddAdHocMemoryNoteRequest {
+                filename: "2026-06-12T12-00-00-codex-memoryd-note.md".to_string(),
+                note: "Remember repo-native commands.".to_string(),
+            },
+        )
+        .await
+        .expect("codex_memoryd add note should succeed");
+
+        let request = request_rx.recv().expect("conclusion request");
+        server.join().expect("server thread should finish");
+
+        assert!(request.starts_with("POST /v1/conclusions "));
+        assert!(request.contains(r#""target":"user""#));
+        assert!(request.contains(r#""conclusions":["Remember repo-native commands."]"#));
+        assert!(request.contains(r#""filename":"2026-06-12T12-00-00-codex-memoryd-note.md""#));
+    }
+
+    #[tokio::test]
+    async fn codex_memoryd_hybrid_add_note_keeps_local_cache_when_provider_errors() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let memory_root = tempdir.path().join("memories");
+        tokio::fs::create_dir_all(&memory_root)
+            .await
+            .expect("create memory root");
+        let (base_url, request_rx, server) = serve_scripted(vec![(
+            "500 Internal Server Error",
+            r#"{"ok":false,"error":{"message":"provider down"}}"#,
+        )]);
+        let backend = SelectedMemoriesBackend::from_settings(
+            LocalMemoriesBackend::from_memory_root(&memory_root),
+            codex_memoryd_settings(
+                codex_config::types::MemoryBackendKind::Hybrid,
+                "codex-memory-lab",
+                Some(base_url),
+            ),
+        );
+
+        crate::backend::MemoriesBackend::add_ad_hoc_note(
+            &backend,
+            AddAdHocMemoryNoteRequest {
+                filename: "2026-06-12T12-00-01-codex-memoryd-hybrid-note.md".to_string(),
+                note: "Hybrid memory keeps a local cache.".to_string(),
+            },
+        )
+        .await
+        .expect("hybrid add note should stay local-first");
+
+        let request = request_rx.recv().expect("hybrid provider request");
+        server.join().expect("server thread should finish");
+
+        assert!(request.starts_with("POST /v1/conclusions "));
+        assert_eq!(
+            tokio::fs::read_to_string(
+                memory_root
+                    .join("extensions/ad_hoc/notes")
+                    .join("2026-06-12T12-00-01-codex-memoryd-hybrid-note.md")
+            )
+            .await
+            .expect("read local hybrid cache"),
+            "Hybrid memory keeps a local cache."
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_memoryd_runtime_writeback_and_local_import_use_expected_endpoints() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let memory_root = tempdir.path().join("memories");
+        tokio::fs::create_dir_all(&memory_root)
+            .await
+            .expect("create memory root");
+        tokio::fs::write(
+            memory_root.join("MEMORY.md"),
+            "Portable memory keeps repo-native defaults.\n",
+        )
+        .await
+        .expect("write local memory");
+        let (base_url, request_rx, server) = serve_scripted(vec![
+            ("200 OK", r#"{"ok":true,"data":{}}"#),
+            (
+                "200 OK",
+                r#"{"ok":true,"data":{"created":1,"updated":0,"proposed":0,"skipped":0,"rejected":0}}"#,
+            ),
+        ]);
+        let settings = codex_memoryd_settings(
+            codex_config::types::MemoryBackendKind::Provider,
+            "codex-memory-lab",
+            Some(base_url),
+        );
+        let provider =
+            crate::codex_memoryd::provider_from_settings(&settings).expect("provider should exist");
+        let runtime = PortableMemoryRuntime::for_provider_tests(settings.clone(), provider);
+        let thread_store = ExtensionData::new("thread");
+        let turn_store = ExtensionData::new("turn");
+        thread_store.insert(runtime);
+
+        let user_item = TurnItem::UserMessage(UserMessageItem::new(&[UserInput::Text {
+            text: "Remember repo-native commands.".to_string(),
+            text_elements: Vec::new(),
+        }]));
+        let assistant_item = TurnItem::AgentMessage(AgentMessageItem {
+            id: "assistant-1".to_string(),
+            content: vec![AgentMessageContent::Text {
+                text: "Keep the local import preview safe.".to_string(),
+            }],
+            phase: None,
+            memory_citation: None,
+        });
+
+        let runtime = thread_store
+            .get::<PortableMemoryRuntime>()
+            .expect("runtime should be stored");
+        runtime
+            .record_turn_item(&turn_store, &user_item)
+            .expect("user turn item should record");
+        runtime
+            .record_turn_item(&turn_store, &assistant_item)
+            .expect("assistant turn item should record");
+        PortableMemoryRuntime::flush_turn_writeback(&thread_store, &turn_store)
+            .await
+            .expect("flush should succeed");
+        let report = runtime
+            .sync_local_files(
+                &tempdir.path().abs(),
+                crate::import_local::ImportLocalCodexMemoryMode::Preview,
+            )
+            .await
+            .expect("local sync should succeed");
+
+        let writeback_request = request_rx.recv().expect("turn writeback request");
+        let sync_request = request_rx.recv().expect("local import request");
+        server.join().expect("server thread should finish");
+
+        assert!(writeback_request.starts_with("POST /v1/turns "));
+        assert!(writeback_request.contains(r#""write_policy":"visible_turns""#));
+        assert!(writeback_request.contains("Remember repo-native commands."));
+        assert!(writeback_request.contains("Keep the local import preview safe."));
+        assert!(sync_request.starts_with("POST /v1/sync/local-codex-memory "));
+        assert!(sync_request.contains(r#""mode":"preview""#));
+        assert!(sync_request.contains(r#""path":"MEMORY.md""#));
+        assert!(sync_request.contains(r#""kind":"memory_registry""#));
+        assert_eq!(report.synced_files, 1);
     }
 
     #[tokio::test]

@@ -443,13 +443,44 @@ fn local_memory_kind(path: &str) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) fn serve_scripted(
+    responses: Vec<(&'static str, &'static str)>,
+) -> (
+    String,
+    std::sync::mpsc::Receiver<String>,
+    std::thread::JoinHandle<()>,
+) {
     use std::io::Read;
     use std::io::Write;
     use std::net::TcpListener;
     use std::sync::mpsc;
     use std::thread;
 
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+    let addr = listener.local_addr().expect("local addr");
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        for (status_line, response_body) in responses {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buffer = [0_u8; 8192];
+            let bytes = stream.read(&mut buffer).expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+            tx.send(request).expect("send captured request");
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        }
+    });
+    (format!("http://{addr}"), rx, handle)
+}
+
+#[cfg(test)]
+mod tests {
     use codex_config::types::CrossProfilePolicy;
     use codex_config::types::LocalImportPolicy;
     use codex_config::types::MemoryBackendKind;
@@ -463,7 +494,7 @@ mod tests {
     #[tokio::test]
     async fn recall_posts_to_v1_recall_and_parses_context() {
         let response_body = r#"{"ok":true,"data":{"summary":"Use repo-native commands.","facts":["Keep provider boundaries explicit."]}}"#;
-        let (base_url, request_rx, server) = serve_once(response_body);
+        let (base_url, request_rx, server) = serve_scripted(vec![("200 OK", response_body)]);
         let settings = memoryd_settings(Some(base_url.clone()));
         let provider = CodexMemorydProvider::new(settings, base_url);
 
@@ -487,7 +518,7 @@ mod tests {
     async fn sync_local_preview_posts_to_memoryd_sync_endpoint() {
         let response_body =
             r#"{"ok":true,"data":{"proposed":1,"created":0,"updated":0,"skipped":0,"rejected":0}}"#;
-        let (base_url, request_rx, server) = serve_once(response_body);
+        let (base_url, request_rx, server) = serve_scripted(vec![("200 OK", response_body)]);
         let settings = memoryd_settings(Some(base_url.clone()));
         let provider = CodexMemorydProvider::new(settings, base_url);
 
@@ -518,30 +549,6 @@ mod tests {
     #[test]
     fn provider_requires_provider_url() {
         assert!(provider_from_settings(&memoryd_settings(None)).is_none());
-    }
-
-    fn serve_once(
-        response_body: &'static str,
-    ) -> (String, mpsc::Receiver<String>, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
-        let addr = listener.local_addr().expect("local addr");
-        let (tx, rx) = mpsc::channel();
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept request");
-            let mut buffer = [0_u8; 8192];
-            let bytes = stream.read(&mut buffer).expect("read request");
-            let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
-            tx.send(request).expect("send captured request");
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write response");
-        });
-        (format!("http://{addr}"), rx, handle)
     }
 
     fn memoryd_settings(provider_url: Option<String>) -> PortableMemorySettings {
