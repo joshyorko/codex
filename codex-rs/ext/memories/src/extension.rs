@@ -12,6 +12,7 @@ use codex_extension_api::ConfigContributor;
 use codex_extension_api::ContextContributor;
 use codex_extension_api::ContextualUserFragment;
 use codex_extension_api::ExtensionData;
+use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::PromptFragment;
 use codex_extension_api::ThreadLifecycleContributor;
@@ -140,14 +141,18 @@ impl ContextContributor for MemoriesExtension {
     }
 }
 
-#[async_trait::async_trait]
 impl ThreadLifecycleContributor<Config> for MemoriesExtension {
-    async fn on_thread_start(&self, input: ThreadStartInput<'_, Config>) {
-        let config = MemoriesExtensionConfig::from_config(input.config);
-        let codex_home = config.codex_home.clone();
-        install_runtime(input.thread_store, &config);
-        input.thread_store.insert(config);
-        sync_local_files_on_startup(input.thread_store, &codex_home).await;
+    fn on_thread_start<'a>(
+        &'a self,
+        input: ThreadStartInput<'a, Config>,
+    ) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            let config = MemoriesExtensionConfig::from_config(input.config);
+            let codex_home = config.codex_home.clone();
+            install_runtime(input.thread_store, &config);
+            input.thread_store.insert(config);
+            sync_local_files_on_startup(input.thread_store, &codex_home).await;
+        })
     }
 }
 

@@ -27,11 +27,13 @@ pub enum SlashCommand {
     #[strum(to_string = "memories", serialize = "memory")]
     Memories,
     Skills,
+    Import,
     Hooks,
     Review,
     Rename,
     New,
     Archive,
+    Delete,
     Resume,
     Fork,
     App,
@@ -90,6 +92,7 @@ impl SlashCommand {
             SlashCommand::Rename => "rename the current thread",
             SlashCommand::Resume => "resume a saved chat",
             SlashCommand::Archive => "archive this session and exit",
+            SlashCommand::Delete => "permanently delete this session and exit",
             SlashCommand::Clear => "clear the terminal and start a new chat",
             SlashCommand::Fork => "fork the current chat",
             SlashCommand::App => "continue this session in Codex Desktop",
@@ -99,6 +102,9 @@ impl SlashCommand {
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Mention => "mention a file",
             SlashCommand::Skills => "use skills to improve how Codex performs specific tasks",
+            SlashCommand::Import => {
+                "import setup, this project, and recent chats from another coding agent"
+            }
             SlashCommand::Hooks => "view and manage lifecycle hooks",
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
@@ -187,6 +193,7 @@ impl SlashCommand {
         match self {
             SlashCommand::New
             | SlashCommand::Archive
+            | SlashCommand::Delete
             | SlashCommand::Resume
             | SlashCommand::Fork
             | SlashCommand::Init
@@ -200,6 +207,7 @@ impl SlashCommand {
             | SlashCommand::SandboxReadRoot
             | SlashCommand::Experimental
             | SlashCommand::Memories
+            | SlashCommand::Import
             | SlashCommand::Review
             | SlashCommand::Plan
             | SlashCommand::Clear
