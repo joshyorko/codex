@@ -178,6 +178,7 @@ pub struct RemoteAppTemplate {
     pub template_id: String,
     pub name: String,
     pub description: Option<String>,
+    pub category: Option<String>,
     pub canonical_connector_id: Option<String>,
     pub logo_url: Option<String>,
     pub logo_url_dark: Option<String>,
@@ -457,6 +458,8 @@ struct RemoteAppTemplateResponse {
     name: String,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
     #[serde(default)]
     canonical_connector_id: Option<String>,
     #[serde(default)]
@@ -1059,6 +1062,7 @@ async fn build_remote_plugin_detail(
                 template_id: template.template_id,
                 name: template.name,
                 description: template.description,
+                category: template.category,
                 canonical_connector_id: template.canonical_connector_id,
                 logo_url: template.logo_url,
                 logo_url_dark: template.logo_url_dark,
@@ -1124,7 +1128,7 @@ pub async fn uninstall_remote_plugin(
     let plugin_name = plugin.name;
 
     let base_url = config.chatgpt_base_url.trim_end_matches('/');
-    let url = format!("{base_url}/plugins/{plugin_id}/uninstall");
+    let url = format!("{base_url}/ps/plugins/{plugin_id}/uninstall");
     let client = build_reqwest_client();
     let request = authenticated_request(client.post(&url), auth)?;
     let response: RemotePluginMutationResponse = send_and_decode(request, &url).await?;

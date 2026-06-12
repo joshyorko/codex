@@ -895,6 +895,7 @@ async fn add_ad_hoc_note_tool_creates_note_file() {
             truncation_policy: TruncationPolicy::Bytes(1024),
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            environments: Vec::new(),
             payload: payload.clone(),
         })
         .await
@@ -938,6 +939,7 @@ async fn add_ad_hoc_note_tool_rejects_paths_as_filenames() {
             truncation_policy: TruncationPolicy::Bytes(1024),
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            environments: Vec::new(),
             payload,
         })
         .await;
@@ -982,6 +984,7 @@ async fn read_tool_reads_memory_file() {
             truncation_policy: TruncationPolicy::Bytes(1024),
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            environments: Vec::new(),
             payload: payload.clone(),
         })
         .await
@@ -1029,6 +1032,7 @@ async fn search_tool_accepts_multiple_queries() {
             truncation_policy: TruncationPolicy::Bytes(1024),
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            environments: Vec::new(),
             payload: payload.clone(),
         })
         .await
@@ -1102,6 +1106,7 @@ async fn search_tool_accepts_windowed_all_match_mode() {
             truncation_policy: TruncationPolicy::Bytes(1024),
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            environments: Vec::new(),
             payload: payload.clone(),
         })
         .await
@@ -1155,6 +1160,7 @@ async fn search_tool_rejects_legacy_single_query() {
             truncation_policy: TruncationPolicy::Bytes(1024),
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            environments: Vec::new(),
             payload,
         })
         .await;
@@ -1285,4 +1291,375 @@ fn provider_unavailable<T>() -> ProviderFuture<'static, T> {
             "provider unavailable".to_string(),
         ))
     })
+}
+
+mod provider_conformance {
+    use super::InMemoryHonchoMemoryClient;
+    use super::LocalMemoriesBackend;
+    use super::SelectedMemoriesBackend;
+    use super::honcho_settings;
+    use crate::backend::ListMemoriesRequest;
+    use crate::backend::MemoriesBackend;
+    use crate::backend::MemoriesBackendError;
+    use crate::backend::ReadMemoryRequest;
+    use crate::backend::SearchMatchMode;
+    use crate::backend::SearchMemoriesRequest;
+
+    #[tokio::test]
+    async fn local_list_sorting_cursor_and_invalid_cursor() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let memory_root = tempdir.path().join("memories");
+        tokio::fs::create_dir_all(&memory_root)
+            .await
+            .expect("create memory root");
+        tokio::fs::create_dir_all(memory_root.join("notes"))
+            .await
+            .expect("create memory directory");
+        tokio::fs::write(memory_root.join("zeta.md"), "zeta\n")
+            .await
+            .expect("write zeta");
+        tokio::fs::write(memory_root.join("alpha.md"), "alpha\n")
+            .await
+            .expect("write alpha");
+        tokio::fs::write(memory_root.join("notes").join("inner.md"), "inner\n")
+            .await
+            .expect("write inner note");
+
+        let backend = LocalMemoriesBackend::from_memory_root(&memory_root);
+
+        let first = MemoriesBackend::list(
+            &backend,
+            ListMemoriesRequest {
+                path: None,
+                cursor: None,
+                max_results: 2,
+            },
+        )
+        .await
+        .expect("list with cursor should succeed");
+        assert_eq!(
+            first.entries,
+            vec![
+                crate::backend::MemoryEntry {
+                    path: "alpha.md".to_string(),
+                    entry_type: crate::backend::MemoryEntryType::File,
+                },
+                crate::backend::MemoryEntry {
+                    path: "notes".to_string(),
+                    entry_type: crate::backend::MemoryEntryType::Directory,
+                },
+            ]
+        );
+        assert_eq!(first.next_cursor, Some("2".to_string()));
+        assert!(first.truncated);
+
+        let second = MemoriesBackend::list(
+            &backend,
+            ListMemoriesRequest {
+                path: None,
+                cursor: Some("2".to_string()),
+                max_results: 2,
+            },
+        )
+        .await
+        .expect("paginated list should succeed");
+        assert_eq!(second.entries.len(), 1);
+        assert_eq!(second.entries[0].path, "zeta.md");
+        assert!(!second.truncated);
+
+        let err = MemoriesBackend::list(
+            &backend,
+            ListMemoriesRequest {
+                path: None,
+                cursor: Some("10".to_string()),
+                max_results: 2,
+            },
+        )
+        .await
+        .expect_err("invalid cursor should be rejected");
+        assert!(matches!(
+            err,
+            MemoriesBackendError::InvalidCursor {
+                cursor,
+                reason
+            } if cursor == "10" && reason == "exceeds result count"
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_read_validation_rejects_bad_offsets_and_missing_file() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let memory_root = tempdir.path().join("memories");
+        tokio::fs::create_dir_all(&memory_root)
+            .await
+            .expect("create memory root");
+        tokio::fs::write(memory_root.join("MEMORY.md"), "alpha\nbeta\n")
+            .await
+            .expect("write memory file");
+
+        let backend = LocalMemoriesBackend::from_memory_root(&memory_root);
+
+        let invalid_line_offset = MemoriesBackend::read(
+            &backend,
+            ReadMemoryRequest {
+                path: "MEMORY.md".to_string(),
+                line_offset: 0,
+                max_lines: Some(1),
+                max_tokens: 1024,
+            },
+        )
+        .await
+        .expect_err("line_offset=0 should be invalid");
+        assert!(matches!(
+            invalid_line_offset,
+            MemoriesBackendError::InvalidLineOffset
+        ));
+
+        let invalid_max_lines = MemoriesBackend::read(
+            &backend,
+            ReadMemoryRequest {
+                path: "MEMORY.md".to_string(),
+                line_offset: 1,
+                max_lines: Some(0),
+                max_tokens: 1024,
+            },
+        )
+        .await
+        .expect_err("max_lines=0 should be invalid");
+        assert!(matches!(
+            invalid_max_lines,
+            MemoriesBackendError::InvalidMaxLines
+        ));
+
+        let missing_file = MemoriesBackend::read(
+            &backend,
+            ReadMemoryRequest {
+                path: "missing.md".to_string(),
+                line_offset: 1,
+                max_lines: Some(1),
+                max_tokens: 1024,
+            },
+        )
+        .await
+        .expect_err("missing file should be rejected");
+        assert!(matches!(
+            missing_file,
+            MemoriesBackendError::NotFound { path } if path == "missing.md"
+        ));
+
+        let out_of_range = MemoriesBackend::read(
+            &backend,
+            ReadMemoryRequest {
+                path: "MEMORY.md".to_string(),
+                line_offset: 99,
+                max_lines: Some(1),
+                max_tokens: 1024,
+            },
+        )
+        .await
+        .expect_err("out-of-range line_offset should be rejected");
+        assert!(matches!(
+            out_of_range,
+            MemoriesBackendError::LineOffsetExceedsFileLength
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_search_validation_and_window_ordering() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let memory_root = tempdir.path().join("memories");
+        tokio::fs::create_dir_all(&memory_root)
+            .await
+            .expect("create memory root");
+        tokio::fs::write(memory_root.join("alpha.md"), "alpha\nbridge\ngamma\n")
+            .await
+            .expect("write alpha");
+        tokio::fs::write(memory_root.join("zeta.md"), "zeta\nafter\n")
+            .await
+            .expect("write zeta");
+
+        let backend = LocalMemoriesBackend::from_memory_root(&memory_root);
+
+        let empty_query = MemoriesBackend::search(
+            &backend,
+            SearchMemoriesRequest {
+                queries: vec![],
+                match_mode: SearchMatchMode::Any,
+                path: None,
+                cursor: None,
+                context_lines: 0,
+                case_sensitive: false,
+                normalized: false,
+                max_results: 10,
+            },
+        )
+        .await
+        .expect_err("empty query should be rejected");
+        assert!(matches!(empty_query, MemoriesBackendError::EmptyQuery));
+
+        let bad_window = MemoriesBackend::search(
+            &backend,
+            SearchMemoriesRequest {
+                queries: vec!["alpha".to_string()],
+                match_mode: SearchMatchMode::AllWithinLines { line_count: 0 },
+                path: None,
+                cursor: None,
+                context_lines: 0,
+                case_sensitive: false,
+                normalized: false,
+                max_results: 10,
+            },
+        )
+        .await
+        .expect_err("invalid match window should be rejected");
+        assert!(matches!(
+            bad_window,
+            MemoriesBackendError::InvalidMatchWindow
+        ));
+
+        let any = MemoriesBackend::search(
+            &backend,
+            SearchMemoriesRequest {
+                queries: vec!["alpha".to_string()],
+                match_mode: SearchMatchMode::Any,
+                path: None,
+                cursor: None,
+                context_lines: 0,
+                case_sensitive: false,
+                normalized: false,
+                max_results: 10,
+            },
+        )
+        .await
+        .expect("search should succeed");
+        assert_eq!(
+            any.matches
+                .into_iter()
+                .map(|entry| entry.path)
+                .collect::<Vec<_>>(),
+            vec!["alpha.md"]
+        );
+
+        let _windowed = MemoriesBackend::search(
+            &backend,
+            SearchMemoriesRequest {
+                queries: vec!["alpha".to_string(), "gamma".to_string()],
+                match_mode: SearchMatchMode::AllWithinLines { line_count: 3 },
+                path: None,
+                cursor: None,
+                context_lines: 0,
+                case_sensitive: false,
+                normalized: false,
+                max_results: 10,
+            },
+        )
+        .await
+        .expect("windowed search should return matches");
+    }
+
+    #[tokio::test]
+    async fn provider_empty_query_rejected_without_network_for_honcho_and_memoryd() {
+        let memory_root = tempfile::tempdir()
+            .expect("tempdir")
+            .path()
+            .join("memories");
+        let honcho_client = InMemoryHonchoMemoryClient::new();
+        let honcho = crate::honcho::provider_for_tests(
+            honcho_settings(
+                codex_config::types::MemoryBackendKind::Provider,
+                "codex-memory-lab",
+            ),
+            honcho_client,
+        );
+        let honcho_backend = SelectedMemoriesBackend::Provider {
+            local: LocalMemoriesBackend::from_memory_root(&memory_root),
+            provider: honcho,
+        };
+        let honcho_err = MemoriesBackend::search(
+            &honcho_backend,
+            SearchMemoriesRequest {
+                queries: vec![],
+                match_mode: SearchMatchMode::Any,
+                path: None,
+                cursor: None,
+                context_lines: 0,
+                case_sensitive: false,
+                normalized: false,
+                max_results: 10,
+            },
+        )
+        .await
+        .expect_err("honcho should reject empty query before client usage");
+        assert!(matches!(honcho_err, MemoriesBackendError::EmptyQuery));
+
+        // CodexMemorydProvider is covered by its own HTTP tests; this conformance
+        // test stays on the public Honcho path to avoid private constructor access.
+    }
+
+    #[tokio::test]
+    async fn provider_path_scope_no_escape_rejects_traversal_like_inputs() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let outside_root = tempdir.path().join("outside");
+        let memory_root = tempdir.path().join("memories");
+        tokio::fs::create_dir_all(&memory_root)
+            .await
+            .expect("create memory root");
+        tokio::fs::create_dir_all(&outside_root)
+            .await
+            .expect("create outside dir");
+        tokio::fs::write(outside_root.join("outside.md"), "outside\n")
+            .await
+            .expect("write outside file");
+        let backend = LocalMemoriesBackend::from_memory_root(&memory_root);
+
+        let backend_path = "../outside.md";
+        assert!(matches!(
+            MemoriesBackend::read(
+                &backend,
+                ReadMemoryRequest {
+                    path: backend_path.to_string(),
+                    line_offset: 1,
+                    max_lines: Some(1),
+                    max_tokens: 1024,
+                },
+            )
+            .await
+            .expect_err("traversal read should be rejected"),
+            MemoriesBackendError::InvalidPath { path, reason }
+                if path == backend_path && reason == "must stay within the memories root"
+        ));
+        assert!(matches!(
+            MemoriesBackend::search(
+                &backend,
+                SearchMemoriesRequest {
+                    queries: vec!["outside".to_string()],
+                    match_mode: SearchMatchMode::Any,
+                    path: Some(backend_path.to_string()),
+                    cursor: None,
+                    context_lines: 0,
+                    case_sensitive: false,
+                    normalized: false,
+                    max_results: 10,
+                },
+            )
+            .await
+            .expect_err("traversal search should be rejected"),
+            MemoriesBackendError::InvalidPath { path, reason }
+                if path == backend_path && reason == "must stay within the memories root"
+        ));
+        assert!(matches!(
+            MemoriesBackend::list(
+                &backend,
+                ListMemoriesRequest {
+                    path: Some(backend_path.to_string()),
+                    cursor: None,
+                    max_results: 10,
+                },
+            )
+            .await
+            .expect_err("traversal list should be rejected"),
+            MemoriesBackendError::InvalidPath { path, reason }
+                if path == backend_path && reason == "must stay within the memories root"
+        ));
+    }
 }
