@@ -170,59 +170,63 @@ impl ConfigContributor<Config> for MemoriesExtension {
     }
 }
 
-#[async_trait::async_trait]
 impl TurnInputContributor for MemoriesExtension {
-    async fn contribute(
-        &self,
+    fn contribute<'a>(
+        &'a self,
         input: TurnInputContext,
-        _session_store: &ExtensionData,
-        thread_store: &ExtensionData,
-        _turn_store: &ExtensionData,
-    ) -> Vec<Box<dyn ContextualUserFragment + Send>> {
-        let Some(config) = thread_store.get::<MemoriesExtensionConfig>() else {
-            return Vec::new();
-        };
-        if !config.enabled || !provider_backed(config.backend) {
-            return Vec::new();
-        }
-        let Some(runtime) = thread_store.get::<PortableMemoryRuntime>() else {
-            return Vec::new();
-        };
-        let query = user_input_to_text(&input.user_input);
-        if query.trim().is_empty() {
-            return Vec::new();
-        }
-        runtime
-            .recall(query)
-            .await
-            .map(|fragment| vec![Box::new(fragment) as Box<dyn ContextualUserFragment + Send>])
-            .unwrap_or_default()
+        _session_store: &'a ExtensionData,
+        thread_store: &'a ExtensionData,
+        _turn_store: &'a ExtensionData,
+    ) -> ExtensionFuture<'a, Vec<Box<dyn ContextualUserFragment + Send>>> {
+        Box::pin(async move {
+            let Some(config) = thread_store.get::<MemoriesExtensionConfig>() else {
+                return Vec::new();
+            };
+            if !config.enabled || !provider_backed(config.backend) {
+                return Vec::new();
+            }
+            let Some(runtime) = thread_store.get::<PortableMemoryRuntime>() else {
+                return Vec::new();
+            };
+            let query = user_input_to_text(&input.user_input);
+            if query.trim().is_empty() {
+                return Vec::new();
+            }
+            runtime
+                .recall(query)
+                .await
+                .map(|fragment| vec![Box::new(fragment) as Box<dyn ContextualUserFragment + Send>])
+                .unwrap_or_default()
+        })
     }
 }
 
-#[async_trait::async_trait]
 impl TurnItemContributor for MemoriesExtension {
-    async fn contribute(
-        &self,
-        thread_store: &ExtensionData,
-        turn_store: &ExtensionData,
-        item: &mut TurnItem,
-    ) -> Result<(), String> {
-        let Some(runtime) = thread_store.get::<PortableMemoryRuntime>() else {
-            return Ok(());
-        };
-        runtime.record_turn_item(turn_store, item)
+    fn contribute<'a>(
+        &'a self,
+        thread_store: &'a ExtensionData,
+        turn_store: &'a ExtensionData,
+        item: &'a mut TurnItem,
+    ) -> ExtensionFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let Some(runtime) = thread_store.get::<PortableMemoryRuntime>() else {
+                return Ok(());
+            };
+            runtime.record_turn_item(turn_store, item)
+        })
     }
 }
 
-#[async_trait::async_trait]
 impl TurnLifecycleContributor for MemoriesExtension {
-    async fn on_turn_stop(&self, input: TurnStopInput<'_>) {
-        if let Err(err) =
-            PortableMemoryRuntime::flush_turn_writeback(input.thread_store, input.turn_store).await
-        {
-            tracing::debug!("portable memory writeback failed: {err}");
-        }
+    fn on_turn_stop<'a>(&'a self, input: TurnStopInput<'a>) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            if let Err(err) =
+                PortableMemoryRuntime::flush_turn_writeback(input.thread_store, input.turn_store)
+                    .await
+            {
+                tracing::debug!("portable memory writeback failed: {err}");
+            }
+        })
     }
 }
 
