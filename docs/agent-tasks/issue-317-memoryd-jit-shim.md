@@ -199,6 +199,56 @@ The first PR may expose only the automatic observation/writeback path, but inter
 
 ---
 
+## Fresh black-box memory stress-test findings — preserve these semantics
+
+A fresh-thread ChatGPT memory/search stress test run on 2026-08-27 produced an important negative result:
+
+```text
+2023 actual prior-chat hits recovered: none
+2024 actual prior-chat hits recovered: none
+2025 actual prior-chat hits recovered: none
+```
+
+The system still recovered useful **other historical context** for 2023 and 2024, used that context to materially change current web-search ranking, and then made longitudinal inferences. For 2025 it found insufficient technical evidence and **abstained** instead of projecting known 2026 preferences backward.
+
+This means useful memory behavior is not one undifferentiated bucket. At minimum the product architecture must be able to distinguish:
+
+```text
+raw/recent episode or prior-chat evidence
+host-native recalled/synthesized context
+MemoryD durable memory / observation
+other historical evidence
+model inference / longitudinal synthesis
+current verified state
+```
+
+The exact MemoryD vocabulary is owned by `codex-memoryd#228`; do not invent a competing Codex ontology. The Codex shim's responsibility is to **preserve provenance and temporal distinctions provided by MemoryD rather than flattening everything into anonymous prompt text**.
+
+### Required Codex-side implications
+
+1. If MemoryD recall returns source kind/class, evidence refs, memory/episode ids, confidence, observed time, valid-time/freshness state, or lineage metadata, do not discard it unnecessarily at the adapter boundary.
+2. Rendering may remain compact, but the model-visible fragment should make important epistemic distinctions legible where practical: e.g. `recent episode`, `durable memory`, `historical/contextual`, `inferred`, and always `recall_not_authority`.
+3. Keep returned MemoryD ids/lineage in turn-local extension state when needed so a later host contribution can say it was **derived from prior MemoryD recall** rather than masquerading as new independent evidence.
+4. If the assistant visibly repeats or reasons from a recalled MemoryD claim, post-turn contribution must not accidentally make that a fresh independent confirmation. Prefer forwarding `derived_from_memory_ids`/lineage when #228 exposes it.
+5. Do not assign a historical timestamp merely because a current model statement describes the past. Preserve explicit source/observed time when available; otherwise mark time unknown/current-observation rather than fabricating chronology.
+6. Newer context must not be silently projected backward into older periods. This policy primarily belongs in MemoryD, but the Codex adapter must preserve timestamps/source classes so MemoryD can enforce it.
+7. Missing provenance makes evidence weaker, not stronger.
+8. Do not label host-native recollection as a verbatim transcript hit unless the source actually provides a raw/episode reference supporting that claim.
+
+### Add focused canaries where the seam can test them
+
+The Codex PR is not responsible for implementing MemoryD's full temporal reasoning engine, but it should prove the adapter does not destroy the information required for that engine. Add tests for:
+
+- provenance/source-class fields from a MemoryD response survive parsing/rendering or turn-local state as designed;
+- returned MemoryD ids can be carried into derived writeback lineage when supported;
+- recalled MemoryD content is not automatically submitted back as an independent primary observation simply because the assistant used it;
+- unknown/missing provenance does not get upgraded to a stronger source class;
+- temporal metadata supplied by MemoryD is preserved rather than rewritten to “now.”
+
+If #228 has not landed the required lineage fields yet, keep these as typed optional fields / explicit TODO contract tests or file a precise blocker back to #228. Do not broaden Codex core to compensate for a missing MemoryD protocol field.
+
+---
+
 ## Native Codex memory coexistence matrix
 
 Add deterministic coverage for these modes:
@@ -242,7 +292,9 @@ Minimum canaries:
 - profile/workspace stay stable;
 - native-memory coexistence matrix passes;
 - MemoryD context is visibly/non-semantically marked recall-not-authority;
-- response/error body handling is bounded.
+- response/error body handling is bounded;
+- source/provenance metadata is not silently flattened away;
+- MemoryD-derived output cannot become false independent evidence through a trivial read/write round trip.
 
 Use a scripted loopback HTTP fixture. Unit/conformance tests must not depend on a live external MemoryD instance.
 
@@ -382,6 +434,7 @@ PR body must include:
 - conformance results;
 - mechanical refresh procedure;
 - native-memory coexistence result;
+- provenance/lineage preservation result from the fresh memory-stress-test requirements;
 - explicit statement that `tap-release` code was used only as historical behavioral evidence.
 
 Before opening the PR:
